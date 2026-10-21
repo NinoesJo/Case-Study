@@ -1,0 +1,8 @@
+---
+title: "Case Study Work"
+author: "Johan Nino Espino"
+date: "October 24, 2026"
+format: pdf
+output: pdf_document
+font-size: 8px
+---
