@@ -991,3 +991,279 @@ cat(
   "\n"
 )
 ```
+
+```{r}
+
+#| label: fit-baseline-models
+
+# Match response labels to their column names
+baseline_labels <- setNames(response_labels, response_columns)
+
+# Explicit predictor list excludes row IDs and fold assignments
+baseline_predictors <- c("Re", "Fr_factor", "St")
+
+baseline_models <- setNames(
+  lapply(cv_responses, function(response) {
+
+    model_formula <- reformulate(
+      baseline_predictors,
+      response = response
+    )
+
+    fit <- lm(model_formula, data = train)
+
+    # Check that all model coefficients are identifiable
+    stopifnot(fit$rank == ncol(model.matrix(fit)))
+
+    fit
+  }),
+  cv_responses
+)
+
+# Store detailed summaries for later inspection
+baseline_summaries <- lapply(baseline_models, summary)
+
+# Compact description of training fit
+baseline_training_summary <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    fit <- baseline_models[[response]]
+    model_summary <- summary(fit)
+
+    data.frame(
+      Response = baseline_labels[[response]],
+      R_squared = model_summary$r.squared,
+      Adjusted_R_squared = model_summary$adj.r.squared,
+      Training_RMSE = sqrt(mean(residuals(fit)^2))
+    )
+  })
+)
+
+knitr::kable(
+  baseline_training_summary,
+  digits = 4,
+  row.names = FALSE,
+  caption = "Main-effects linear models: training fit"
+)
+```
+
+```{r}
+
+#| label: baseline-cross-validation
+
+baseline_oof_parts <- list()
+part_number <- 1L
+
+for (response in cv_responses) {
+
+  model_formula <- reformulate(
+    baseline_predictors,
+    response = response
+  )
+
+  for (k in seq_len(K)) {
+
+    analysis_rows <- cv_folds[[k]]$analysis
+    assessment_rows <- cv_folds[[k]]$assessment
+
+    analysis_data <- train[analysis_rows, ]
+    assessment_data <- train[assessment_rows, ]
+
+    fold_fit <- lm(model_formula, data = analysis_data)
+
+    stopifnot(
+      fold_fit$rank == ncol(model.matrix(fold_fit))
+    )
+
+    fold_predictions <- as.numeric(
+      predict(fold_fit, newdata = assessment_data)
+    )
+
+    baseline_oof_parts[[part_number]] <- data.frame(
+      row_id = assessment_data$row_id,
+      Response = response,
+      Fold = k,
+      Re = assessment_data$Re,
+      Fr = assessment_data$Fr,
+      St = assessment_data$St,
+      Observed = assessment_data[[response]],
+      Predicted = fold_predictions,
+      Mean_only_prediction = mean(analysis_data[[response]])
+    )
+
+    part_number <- part_number + 1L
+  }
+}
+
+# OOF means out-of-fold: every prediction comes from a fit
+# that excluded the observation being predicted.
+baseline_oof <- do.call(rbind, baseline_oof_parts)
+
+baseline_cv_summary <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    predictions <- baseline_oof[
+      baseline_oof$Response == response,
+    ]
+
+    # Exactly one held-out prediction per training observation
+    stopifnot(
+      nrow(predictions) == nrow(train),
+      identical(
+        sort(predictions$row_id),
+        sort(train$row_id)
+      )
+    )
+
+    linear_scores <- score_predictions(
+      predictions$Observed,
+      predictions$Predicted
+    )
+
+    mean_scores <- score_predictions(
+      predictions$Observed,
+      predictions$Mean_only_prediction
+    )
+
+    data.frame(
+      Response = baseline_labels[[response]],
+      CV_RMSE = linear_scores$RMSE,
+      CV_MAE = linear_scores$MAE,
+      Mean_only_RMSE = mean_scores$RMSE,
+      Nonpositive = linear_scores$Nonpositive_predictions
+    )
+  })
+)
+
+knitr::kable(
+  baseline_cv_summary,
+  digits = 4,
+  row.names = FALSE,
+  caption = "Original-scale out-of-fold prediction performance"
+)
+```
+
+```{r}
+
+#| label: baseline-diagnostics
+#| fig-width: 8
+#| fig-height: 7
+
+plot_baseline_diagnostics <- function(model, response_label) {
+
+  old_par <- par(
+    mfrow = c(2, 2),
+    oma = c(0, 0, 3, 0),
+    mar = c(4, 4, 2, 1)
+  )
+
+  on.exit(par(old_par))
+
+  plot(
+    model,
+    which = c(1, 2, 3, 5),
+    ask = FALSE
+  )
+
+  mtext(
+    paste("Baseline diagnostics:", response_label),
+    outer = TRUE,
+    line = 1,
+    font = 2
+  )
+}
+
+for (response in cv_responses) {
+  plot_baseline_diagnostics(
+    baseline_models[[response]],
+    baseline_labels[[response]]
+  )
+}
+```
+
+```{r}
+
+#| label: baseline-error-patterns
+#| fig-width: 8
+#| fig-height: 8
+
+baseline_oof$Error <- (
+  baseline_oof$Observed - baseline_oof$Predicted
+)
+
+baseline_oof$Response_label <- factor(
+  baseline_oof$Response,
+  levels = cv_responses,
+  labels = unname(baseline_labels[cv_responses])
+)
+
+baseline_oof$Re_factor <- factor(
+  baseline_oof$Re,
+  levels = levels(train$Re_factor)
+)
+
+baseline_oof$Fr_factor <- factor(
+  baseline_oof$Fr,
+  levels = levels(train$Fr_factor)
+)
+
+ggplot(
+  baseline_oof,
+  aes(
+    x = St,
+    y = Error,
+    color = Re_factor
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  geom_point(size = 2) +
+  scale_color_manual(values = Re_colors) +
+  scale_x_log10(
+    breaks = c(0.05, 0.1, 0.3, 1, 3)
+  ) +
+  facet_grid(
+    Response_label ~ Fr_factor,
+    scales = "free_y",
+    labeller = label_both
+  ) +
+  labs(
+    title = "Held-out prediction errors from the baseline models",
+    x = "Stokes number (log10 scale)",
+    y = "Observed minus predicted",
+    color = "Re"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "top")
+
+# Inspect the most influential observations in the full-training fits
+baseline_influence <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    cook <- cooks.distance(baseline_models[[response]])
+    selected_rows <- head(order(cook, decreasing = TRUE), 2)
+
+    data.frame(
+      Response = baseline_labels[[response]],
+      Row = train$row_id[selected_rows],
+      Re = train$Re[selected_rows],
+      Fr = train$Fr[selected_rows],
+      St = train$St[selected_rows],
+      Cooks_distance = unname(cook[selected_rows])
+    )
+  })
+)
+
+knitr::kable(
+  baseline_influence,
+  digits = 4,
+  row.names = FALSE,
+  caption = "Two largest Cook's distances for each baseline model"
+)
+```
