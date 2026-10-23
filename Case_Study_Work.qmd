@@ -111,3 +111,406 @@ knitr::kable(
 # Summarize the calculated responses
 summary(train[response_names])
 ```
+
+```{r}
+
+#| label: predictor-setup
+#| message: false
+
+library(ggplot2)
+
+# Check that all test predictor levels occur in the training data
+stopifnot(
+  all(test$Re %in% train$Re),
+  all(test$Fr %in% train$Fr),
+  all(test$St %in% train$St)
+)
+
+# Use identical factor levels in training and test data
+Re_levels <- sort(unique(train$Re))
+Fr_levels <- sort(unique(train$Fr))
+St_levels <- sort(unique(train$St))
+
+train$Re_factor <- factor(train$Re, levels = Re_levels)
+test$Re_factor  <- factor(test$Re, levels = Re_levels)
+
+train$Fr_factor <- factor(train$Fr, levels = Fr_levels)
+test$Fr_factor  <- factor(test$Fr, levels = Fr_levels)
+
+# Inverse Froude number: Inf becomes 0
+train$inv_Fr <- 1 / train$Fr
+test$inv_Fr  <- 1 / test$Fr
+
+# Compact summary of the original predictors
+predictor_summary <- data.frame(
+  Predictor = c("Re", "Fr", "St"),
+  Training_levels = sapply(train[predictors], function(x) length(unique(x))),
+  Test_levels = sapply(test[predictors], function(x) length(unique(x))),
+  Training_min = sapply(train[predictors], min),
+  Training_max = sapply(train[predictors], max),
+  row.names = NULL
+)
+
+# Explicitly match the displayed predictor order
+predictor_summary <- data.frame(
+  Predictor = predictors,
+  Training_levels = sapply(train[predictors], function(x) length(unique(x))),
+  Test_levels = sapply(test[predictors], function(x) length(unique(x))),
+  Training_min = sapply(train[predictors], min),
+  Training_max = sapply(train[predictors], max),
+  row.names = NULL
+)
+
+knitr::kable(
+  predictor_summary,
+  caption = "Predictor ranges and number of distinct settings"
+)
+
+knitr::kable(
+  data.frame(Fr = Fr_levels, Inverse_Fr = 1 / Fr_levels),
+  digits = 4,
+  caption = "Froude number and its reciprocal"
+)
+```
+
+```{r}
+
+#| label: predictor-counts
+#| fig-width: 7
+#| fig-height: 3.5
+
+# Combine predictors only; no response values are used here
+design_data <- rbind(
+  data.frame(train[predictors], Dataset = "Training"),
+  data.frame(test[predictors], Dataset = "Test")
+)
+
+design_data$Dataset <- factor(
+  design_data$Dataset,
+  levels = c("Training", "Test")
+)
+
+# Helper function for count plots
+plot_setting_counts <- function(variable, setting_levels, axis_label) {
+
+  plot_data <- data.frame(
+    Setting = factor(design_data[[variable]], levels = setting_levels),
+    Dataset = design_data$Dataset
+  )
+
+  ggplot(plot_data, aes(x = Setting, fill = Dataset)) +
+    geom_bar(position = "dodge") +
+    scale_fill_manual(values = c("Training" = "#2166AC", "Test" = "#D6604D")) +
+    labs(
+      x = axis_label,
+      y = "Number of simulations",
+      fill = "Dataset"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "top")
+}
+
+plot_setting_counts("Re", Re_levels, "Reynolds number (Re)")
+plot_setting_counts("Fr", Fr_levels, "Froude number (Fr)")
+plot_setting_counts("St", St_levels, "Stokes number (St)")
+
+```
+
+```{r}
+
+#| label: simulation-counts
+
+# Include every combination, even combinations with no observations
+design_counts <- expand.grid(
+  Re = Re_levels,
+  Fr = Fr_levels
+)
+
+design_counts <- design_counts[
+  order(design_counts$Re, design_counts$Fr),
+]
+
+design_counts$Training <- mapply(
+  function(re, fr) sum(train$Re == re & train$Fr == fr),
+  design_counts$Re,
+  design_counts$Fr
+)
+
+design_counts$Test <- mapply(
+  function(re, fr) sum(test$Re == re & test$Fr == fr),
+  design_counts$Re,
+  design_counts$Fr
+)
+
+design_counts$Total <- design_counts$Training + design_counts$Test
+
+knitr::kable(
+  design_counts,
+  row.names = FALSE,
+  caption = "Simulation counts within each Re and Fr combination"
+)
+
+# Check for exact input settings shared by training and test data
+shared_settings <- merge(
+  unique(train[predictors]),
+  unique(test[predictors]),
+  by = predictors
+)
+
+cat(
+  "\nNumber of exact input settings shared by training and test:",
+  nrow(shared_settings),
+  "\n"
+)
+```
+
+```{r}
+
+#| label: simulation-coverage
+#| fig-width: 8
+#| fig-height: 6
+
+design_data$Re_factor <- factor(design_data$Re, levels = Re_levels)
+design_data$Fr_factor <- factor(design_data$Fr, levels = Fr_levels)
+
+ggplot(
+  design_data,
+  aes(x = St, y = Dataset, color = Dataset, shape = Dataset)
+) +
+  geom_point(size = 2.5) +
+  facet_grid(
+    Re_factor ~ Fr_factor,
+    labeller = label_both,
+    drop = FALSE
+  ) +
+  scale_color_manual(
+    values = c("Training" = "#2166AC", "Test" = "#D6604D")
+  ) +
+  scale_shape_manual(
+    values = c("Training" = 16, "Test" = 17)
+  ) +
+  scale_x_continuous(
+    breaks = c(0.05, 0.5, 1, 1.5, 2, 3)
+  ) +
+  labs(
+    title = "Training and test coverage of the simulation settings",
+    x = "Stokes number (St)",
+    y = NULL
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+
+#| label: response-plotting-data
+
+response_columns <- c(
+  "mean_volume",
+  "sd_volume",
+  "skewness_volume",
+  "kurtosis_volume"
+)
+
+response_labels <- c(
+  "Mean",
+  "Standard deviation",
+  "Skewness",
+  "Kurtosis"
+)
+
+# Confirm that the responses exist and are finite
+stopifnot(
+  all(response_columns %in% names(train)),
+  all(is.finite(as.matrix(train[response_columns])))
+)
+
+# One row per simulation and response
+response_long <- do.call(
+  rbind,
+  lapply(seq_along(response_columns), function(j) {
+    data.frame(
+      St = train$St,
+      Re_factor = train$Re_factor,
+      Fr_factor = train$Fr_factor,
+      Response = response_labels[j],
+      Value = train[[response_columns[j]]]
+    )
+  })
+)
+
+response_long$Response <- factor(
+  response_long$Response,
+  levels = response_labels
+)
+
+# The log-scale plots below require positive values.
+# Stop rather than silently removing nonpositive observations.
+stopifnot(all(response_long$Value > 0))
+
+# Consistent colors for Reynolds-number settings
+Re_colors <- c(
+  "90" = "#2166AC",
+  "224" = "#1B7837",
+  "398" = "#B2182B"
+)
+```
+
+```{r}
+
+#| label: response-distributions
+#| fig-width: 8
+#| fig-height: 5.5
+
+# Original-scale distributions
+ggplot(response_long, aes(x = Value)) +
+  geom_histogram(
+    bins = 15,
+    fill = "#2166AC",
+    color = "white"
+  ) +
+  facet_wrap(
+    ~ Response,
+    scales = "free",
+    ncol = 2
+  ) +
+  labs(
+    title = "Distributions of the training responses",
+    x = "Response value",
+    y = "Number of simulations"
+  ) +
+  theme_bw(base_size = 11)
+
+# Distributions after taking log10
+ggplot(response_long, aes(x = log10(Value))) +
+  geom_histogram(
+    bins = 15,
+    fill = "#1B7837",
+    color = "white"
+  ) +
+  facet_wrap(
+    ~ Response,
+    scales = "free",
+    ncol = 2
+  ) +
+  labs(
+    title = "Distributions of the log-transformed responses",
+    x = "log10(response value)",
+    y = "Number of simulations"
+  ) +
+  theme_bw(base_size = 11)
+```
+
+```{r}
+
+#| label: responses-versus-St
+#| fig-width: 8
+#| fig-height: 3.8
+
+for (response_name in response_labels) {
+
+  plot_data <- response_long[
+    response_long$Response == response_name,
+  ]
+
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = St,
+      y = Value,
+      color = Re_factor,
+      group = Re_factor
+    )
+  ) +
+    geom_line(linewidth = 0.5) +
+    geom_point(size = 2) +
+    facet_wrap(
+      ~ Fr_factor,
+      nrow = 1,
+      labeller = label_both,
+      drop = FALSE
+    ) +
+    scale_color_manual(values = Re_colors) +
+    scale_y_log10() +
+    scale_x_continuous(
+      breaks = c(0.05, 0.5, 1, 2, 3)
+    ) +
+    labs(
+      title = paste(response_name, "versus Stokes number"),
+      subtitle = "Lines connect available training observations within each Re-Fr regime",
+      x = "Stokes number (St)",
+      y = paste(response_name, "(log10 scale)"),
+      color = "Re"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "top")
+
+  print(p)
+}
+```
+
+```{r}
+
+#| label: responses-by-Re-and-Fr
+#| fig-width: 8
+#| fig-height: 6
+
+# Responses grouped by Reynolds number
+ggplot(
+  response_long,
+  aes(x = Re_factor, y = Value)
+) +
+  geom_boxplot(
+    fill = "#D1E5F0",
+    outlier.shape = NA,
+    width = 0.6
+  ) +
+  geom_point(
+    position = position_jitter(
+      width = 0.10,
+      height = 0,
+      seed = 325
+    ),
+    alpha = 0.65,
+    size = 1.5
+  ) +
+  scale_y_log10() +
+  facet_wrap(~ Response, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Training responses grouped by Reynolds number",
+    x = "Reynolds number (Re)",
+    y = "Response value (log10 scale)"
+  ) +
+  theme_bw(base_size = 11)
+
+# Responses grouped by Froude number
+ggplot(
+  response_long,
+  aes(x = Fr_factor, y = Value)
+) +
+  geom_boxplot(
+    fill = "#D9F0D3",
+    outlier.shape = NA,
+    width = 0.6
+  ) +
+  geom_point(
+    position = position_jitter(
+      width = 0.10,
+      height = 0,
+      seed = 325
+    ),
+    alpha = 0.65,
+    size = 1.5
+  ) +
+  scale_y_log10() +
+  facet_wrap(~ Response, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Training responses grouped by Froude number",
+    x = "Froude number (Fr)",
+    y = "Response value (log10 scale)"
+  ) +
+  theme_bw(base_size = 11)
+```
