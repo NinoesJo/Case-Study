@@ -750,3 +750,244 @@ ggplot(
   theme_bw(base_size = 11) +
   theme(legend.position = "top")
 ```
+
+```{r}
+
+#| label: create-validation-folds
+
+# Reproducible random assignment
+set.seed(325)
+
+K <- 5L
+
+# Stable identifiers matching the current training-data row order
+train$row_id <- seq_len(nrow(train))
+
+# Identify the observed simulation regimes
+train$regime <- interaction(
+  train$Re_factor,
+  train$Fr_factor,
+  drop = TRUE,
+  sep = " / "
+)
+
+train$cv_fold <- NA_integer_
+
+# Randomize the labels of the five folds
+fold_order <- sample(seq_len(K))
+
+# Cycle through fold labels across regimes.
+# This keeps total fold sizes and within-regime counts balanced.
+offset <- 0L
+
+for (regime_name in levels(train$regime)) {
+
+  rows <- which(train$regime == regime_name)
+
+  assignments <- fold_order[
+    ((seq_along(rows) - 1L + offset) %% K) + 1L
+  ]
+
+  # Randomly assign these fold labels to observations in this regime
+  train$cv_fold[rows] <- assignments[
+    sample.int(length(rows))
+  ]
+
+  offset <- offset + length(rows)
+}
+
+# Save row indices for each training/validation split
+cv_folds <- lapply(seq_len(K), function(k) {
+  list(
+    analysis = which(train$cv_fold != k),
+    assessment = which(train$cv_fold == k)
+  )
+})
+
+names(cv_folds) <- paste0("Fold_", seq_len(K))
+```
+
+```{r}
+
+#| label: check-validation-folds
+
+# Every row must have a valid fold assignment
+stopifnot(
+  !anyNA(train$cv_fold),
+  all(train$cv_fold %in% seq_len(K))
+)
+
+# Every observation must appear in exactly one assessment set
+assessment_rows <- unlist(
+  lapply(cv_folds, function(x) x$assessment),
+  use.names = FALSE
+)
+
+stopifnot(
+  identical(sort(assessment_rows), seq_len(nrow(train)))
+)
+
+# Check separation and regime coverage in every split
+for (k in seq_len(K)) {
+
+  analysis_rows <- cv_folds[[k]]$analysis
+  assessment_rows <- cv_folds[[k]]$assessment
+
+  stopifnot(
+    length(intersect(analysis_rows, assessment_rows)) == 0L,
+    length(analysis_rows) + length(assessment_rows) == nrow(train),
+    all(
+      levels(train$regime) %in%
+        as.character(train$regime[analysis_rows])
+    ),
+    all(
+      levels(train$regime) %in%
+        as.character(train$regime[assessment_rows])
+    )
+  )
+}
+
+# Overall fold sizes
+fold_summary <- data.frame(
+  Fold = seq_len(K),
+  Training_rows = vapply(
+    cv_folds,
+    function(x) length(x$analysis),
+    integer(1)
+  ),
+  Validation_rows = vapply(
+    cv_folds,
+    function(x) length(x$assessment),
+    integer(1)
+  )
+)
+
+knitr::kable(
+  fold_summary,
+  row.names = FALSE,
+  caption = "Training and validation sample sizes"
+)
+
+# Counts of held-out observations by regime and fold
+regime_fold_counts <- table(
+  Regime = train$regime,
+  Fold = factor(train$cv_fold, levels = seq_len(K))
+)
+
+regime_fold_table <- data.frame(
+  Regime = rownames(regime_fold_counts),
+  as.data.frame.matrix(regime_fold_counts),
+  row.names = NULL,
+  check.names = FALSE
+)
+
+names(regime_fold_table)[-1] <- paste0("Fold ", seq_len(K))
+
+knitr::kable(
+  regime_fold_table,
+  caption = "Validation observations from each Re / Fr regime"
+)
+```
+
+```{r}
+
+#| label: validation-design-plot
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot(
+  train,
+  aes(
+    x = St,
+    y = factor(cv_fold, levels = seq_len(K))
+  )
+) +
+  geom_point(
+    color = "#2166AC",
+    size = 2
+  ) +
+  scale_x_log10(
+    breaks = c(0.05, 0.1, 0.3, 1, 3)
+  ) +
+  facet_grid(
+    Re_factor ~ Fr_factor,
+    labeller = label_both,
+    drop = FALSE
+  ) +
+  labs(
+    title = "Cross-validation assignments across simulation settings",
+    subtitle = "Each point is held out in the fold shown",
+    x = "Stokes number (log10 scale)",
+    y = "Validation fold"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank())
+
+# Check the distribution of small-St observations
+small_St_counts <- data.frame(
+  Fold = seq_len(K),
+  Small_St_validation_rows = vapply(
+    cv_folds,
+    function(x) {
+      as.integer(sum(train$St[x$assessment] <= 0.3))
+    },
+    integer(1)
+  )
+)
+
+knitr::kable(
+  small_St_counts,
+  caption = "Validation observations with St at or below 0.3"
+)
+```
+
+```{r}
+
+#| label: validation-scoring-functions
+
+# Responses to evaluate separately
+cv_responses <- c(
+  "mean_volume",
+  "sd_volume",
+  "skewness_volume",
+  "kurtosis_volume"
+)
+
+# Score original-scale observed values and held-out predictions
+score_predictions <- function(observed, predicted) {
+
+  stopifnot(
+    is.numeric(observed),
+    is.numeric(predicted),
+    length(observed) == length(predicted),
+    length(observed) > 0L,
+    all(is.finite(observed)),
+    all(is.finite(predicted))
+  )
+
+  errors <- observed - predicted
+
+  data.frame(
+    RMSE = sqrt(mean(errors^2)),
+    MAE = mean(abs(errors)),
+    Nonpositive_predictions = sum(predicted <= 0)
+  )
+}
+
+# Retain the validation settings for later modeling steps
+cv_settings <- list(
+  seed = 325L,
+  folds = K,
+  responses = cv_responses,
+  primary_metric = "Original-scale RMSE",
+  secondary_metric = "Original-scale MAE"
+)
+
+cat(
+  "Validation setup complete:",
+  K, "folds;",
+  length(cv_responses), "responses;",
+  "primary metric =", cv_settings$primary_metric,
+  "\n"
+)
+```
