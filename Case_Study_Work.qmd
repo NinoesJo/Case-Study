@@ -514,3 +514,239 @@ ggplot(
   ) +
   theme_bw(base_size = 11)
 ```
+
+```{r}
+
+#| label: candidate-transformations
+
+# Check domains before taking logarithms
+stopifnot(
+  all(train$St > 0), all(test$St > 0),
+  all(train$Re > 0), all(test$Re > 0),
+  all(as.matrix(train[response_columns]) > 0)
+)
+
+# Candidate predictor transformations
+train$log10_St <- log10(train$St)
+test$log10_St  <- log10(test$St)
+
+train$log10_Re <- log10(train$Re)
+test$log10_Re  <- log10(test$Re)
+
+# Candidate response transformations: training data only
+for (response in response_columns) {
+  train[[paste0("log10_", response)]] <- log10(train[[response]])
+}
+
+# Predictor transformation reference
+transformation_reference <- data.frame(
+  Predictor = c("St", "Re", "Fr"),
+  Candidate = c("log10(St)", "log10(Re)", "1/Fr"),
+  Purpose = c(
+    "Represent proportional changes in particle inertia",
+    "Represent proportional changes in Reynolds number",
+    "Represent relative gravity strength; Inf becomes zero"
+  )
+)
+
+knitr::kable(
+  transformation_reference,
+  caption = "Candidate predictor transformations"
+)
+```
+
+```{r}
+
+#| label: small-St-investigation
+#| fig-width: 8
+#| fig-height: 8
+
+small_St <- train[train$St <= 0.3, ]
+
+small_St <- small_St[
+  order(small_St$Re, small_St$Fr, small_St$St),
+]
+
+small_St_table <- small_St[
+  c(
+    "Re", "Fr", "St",
+    "sd_volume", "skewness_volume", "kurtosis_volume"
+  )
+]
+
+# Round only the displayed copy
+small_St_table[] <- lapply(
+  small_St_table,
+  function(x) signif(x, 4)
+)
+
+knitr::kable(
+  small_St_table,
+  row.names = FALSE,
+  caption = "Response summaries at small Stokes numbers"
+)
+
+ggplot(
+  response_long[response_long$St <= 0.3, ],
+  aes(
+    x = St,
+    y = Value,
+    color = Re_factor,
+    group = Re_factor
+  )
+) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 2) +
+  scale_color_manual(values = Re_colors) +
+  scale_y_log10() +
+  scale_x_continuous(breaks = c(0.05, 0.1, 0.2, 0.3)) +
+  facet_grid(
+    Response ~ Fr_factor,
+    scales = "free_y",
+    labeller = label_both
+  ) +
+  labs(
+    title = "Response behavior at small Stokes numbers",
+    x = "Stokes number (St)",
+    y = "Response value (log10 scale)",
+    color = "Re"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "top")
+```
+
+```{r}
+
+#| label: compare-St-transformations
+#| fig-width: 9
+#| fig-height: 5.5
+
+# Two representations of the same observations
+St_scale_data <- rbind(
+  data.frame(
+    response_long,
+    X = response_long$St,
+    Representation = "St"
+  ),
+  data.frame(
+    response_long,
+    X = log10(response_long$St),
+    Representation = "log10(St)"
+  )
+)
+
+St_scale_data$Representation <- factor(
+  St_scale_data$Representation,
+  levels = c("St", "log10(St)")
+)
+
+for (response_name in response_labels) {
+
+  plot_data <- St_scale_data[
+    St_scale_data$Response == response_name,
+  ]
+
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = X,
+      y = Value,
+      color = Re_factor,
+      group = Re_factor
+    )
+  ) +
+    geom_line(linewidth = 0.5) +
+    geom_point(size = 1.8) +
+    scale_color_manual(values = Re_colors) +
+    scale_y_log10() +
+    facet_wrap(
+      vars(Representation, Fr_factor),
+      ncol = 3,
+      scales = "free_x",
+      labeller = label_both
+    ) +
+    labs(
+      title = paste("Comparing St representations:", response_name),
+      x = "Predictor value on the indicated scale",
+      y = paste(response_name, "(log10 scale)"),
+      color = "Re"
+    ) +
+    theme_bw(base_size = 10) +
+    theme(legend.position = "top")
+
+  print(p)
+}
+```
+
+```{r}
+
+#| label: matched-gravity-contrasts
+#| fig-width: 8
+#| fig-height: 6
+
+matching_columns <- c("St", "Re_factor", "Response", "Value")
+
+strong_gravity <- response_long[
+  response_long$Fr_factor == "0.052",
+  matching_columns
+]
+
+no_gravity <- response_long[
+  response_long$Fr_factor == "Inf",
+  matching_columns
+]
+
+# Match on all remaining predictors and the response being compared
+gravity_contrasts <- merge(
+  strong_gravity,
+  no_gravity,
+  by = c("St", "Re_factor", "Response"),
+  suffixes = c("_strong", "_none")
+)
+
+gravity_contrasts$log10_ratio <- log10(
+  gravity_contrasts$Value_strong /
+    gravity_contrasts$Value_none
+)
+
+# Show how many matched settings support each Re comparison
+matched_counts <- unique(
+  gravity_contrasts[c("Re_factor", "St")]
+)
+
+knitr::kable(
+  as.data.frame(table(Re = matched_counts$Re_factor)),
+  caption = "Number of matched St settings for the gravity comparison"
+)
+
+ggplot(
+  gravity_contrasts,
+  aes(
+    x = St,
+    y = log10_ratio,
+    color = Re_factor,
+    group = Re_factor
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey50"
+  ) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 2) +
+  scale_color_manual(values = Re_colors) +
+  scale_x_log10(
+    breaks = c(0.05, 0.1, 0.3, 1, 3)
+  ) +
+  facet_wrap(~ Response, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Gravity contrasts at matched predictor settings",
+    subtitle = "Strong gravity relative to no gravity",
+    x = "Stokes number (log10 scale)",
+    y = "log10(strong-gravity response / no-gravity response)",
+    color = "Re"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "top")
+```
