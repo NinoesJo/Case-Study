@@ -6,3 +6,108 @@ format: pdf
 output: pdf_document
 font-size: 8px
 ---
+
+```{r}
+
+# 1. Load the original data
+train_raw <- read.csv("data/data-train.csv")
+test_raw  <- read.csv("data/data-test.csv")
+
+train <- train_raw
+test  <- test_raw
+
+predictors <- c("St", "Re", "Fr")
+raw_moments <- paste0("R_moment_", 1:4)
+```
+
+```{r}
+
+# 2. Check required columns
+stopifnot(
+  all(c(predictors, raw_moments) %in% names(train)),
+  all(predictors %in% names(test))
+)
+
+# Check that the required columns are numeric and have no missing values.
+# Fr = Inf is an intentional simulation setting, not a missing value.
+stopifnot(
+  all(vapply(train[c(predictors, raw_moments)], is.numeric, logical(1))),
+  all(vapply(test[predictors], is.numeric, logical(1))),
+  !anyNA(train[c(predictors, raw_moments)]),
+  !anyNA(test[predictors])
+)
+
+# Re, St, and the raw moments must be finite.
+stopifnot(
+  all(is.finite(as.matrix(train[c("St", "Re", raw_moments)]))),
+  all(is.finite(as.matrix(test[c("St", "Re")]))),
+  all(train$Fr > 0),
+  all(test$Fr > 0)
+)
+```
+
+```{r}
+
+# 3. Convert raw moments into distribution summaries
+m1 <- train$R_moment_1
+m2 <- train$R_moment_2
+m3 <- train$R_moment_3
+m4 <- train$R_moment_4
+
+train$mean_volume <- m1
+train$variance_volume <- m2 - m1^2
+
+# Stop and investigate if any variance is nonpositive.
+if (any(train$variance_volume <= 0)) {
+  stop("At least one calculated variance is nonpositive. Inspect those rows.")
+}
+
+train$sd_volume <- sqrt(train$variance_volume)
+
+central_moment_3 <- m3 - 3 * m1 * m2 + 2 * m1^3
+central_moment_4 <- m4 - 4 * m1 * m3 + 6 * m1^2 * m2 - 3 * m1^4
+
+train$skewness_volume <- central_moment_3 / train$sd_volume^3
+train$kurtosis_volume <- central_moment_4 / train$sd_volume^4
+
+response_names <- c(
+  "mean_volume", "variance_volume", "sd_volume",
+  "skewness_volume", "kurtosis_volume"
+)
+
+stopifnot(
+  all(is.finite(as.matrix(train[response_names])))
+)
+```
+
+```{r}
+#| message: false
+
+# 4. Print a compact preparation check
+preparation_check <- data.frame(
+  dataset = c("Training", "Test"),
+  rows = c(nrow(train_raw), nrow(test_raw)),
+  original_columns = c(ncol(train_raw), ncol(test_raw)),
+  missing_entries = c(sum(is.na(train_raw)), sum(is.na(test_raw))),
+  duplicate_input_settings = c(
+    sum(duplicated(train_raw[predictors])),
+    sum(duplicated(test_raw[predictors]))
+  ),
+  infinite_Fr_settings = c(
+    sum(is.infinite(train_raw$Fr)),
+    sum(is.infinite(test_raw$Fr))
+  )
+)
+
+knitr::kable(preparation_check, caption = "Data preparation checks")
+
+# Preview the predictors and calculated responses
+knitr::kable(
+  head(train[c(predictors, response_names)]),
+  digits = 5,
+  caption = "First six training observations"
+)
+
+# Summarize the calculated responses
+summary(train[response_names])
+```
