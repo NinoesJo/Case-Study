@@ -1267,3 +1267,817 @@ knitr::kable(
   caption = "Two largest Cook's distances for each baseline model"
 )
 ```
+
+```{r}
+
+#| label: flexible-model-setup
+#| message: false
+
+library(glmnet)
+
+# Right-hand sides for the unpenalized log-response models
+flexible_rhs <- c(
+  Log_main = "Re + Fr_factor + St",
+
+  Log_inputs =
+    "log10_Re + Fr_factor + log10_St",
+
+  Factor_Re =
+    "Re_factor + Fr_factor + log10_St",
+
+  Regime_linear =
+    "regime + log10_St",
+
+  Regime_quadratic =
+    "regime + log10_St + I(log10_St^2)",
+
+  Regime_curves =
+    "regime * (log10_St + I(log10_St^2))",
+
+  Spline =
+    "regime + splines::ns(log10_St, df = 3)"
+)
+
+# Ridge and lasso use the same expanded predictor set
+penalty_formula <- ~ regime * (log10_St + I(log10_St^2))
+
+candidate_names <- c(names(flexible_rhs), "Ridge", "Lasso")
+
+# Create balanced, regime-stratified inner folds
+make_inner_folds <- function(groups, K = 5L, seed = 325L) {
+
+  set.seed(seed)
+
+  groups <- droplevels(factor(groups))
+  fold_id <- integer(length(groups))
+  fold_order <- sample(seq_len(K))
+  offset <- 0L
+
+  for (g in levels(groups)) {
+
+    rows <- which(groups == g)
+
+    assignments <- fold_order[
+      ((seq_along(rows) - 1L + offset) %% K) + 1L
+    ]
+
+    fold_id[rows] <- assignments[sample.int(length(rows))]
+    offset <- offset + length(rows)
+  }
+
+  fold_id
+}
+
+# Save identical inner splits for all responses and candidates
+inner_fold_ids <- lapply(seq_len(K), function(k) {
+
+  analysis_rows <- cv_folds[[k]]$analysis
+
+  make_inner_folds(
+    train$regime[analysis_rows],
+    seed = 325L + k
+  )
+})
+
+knitr::kable(
+  data.frame(
+    Model = names(flexible_rhs),
+    Predictors = unname(flexible_rhs)
+  ),
+  row.names = FALSE,
+  caption = "Unpenalized log-response candidate models"
+)
+```
+
+```{r}
+
+#| label: flexible-model-functions
+
+fit_flexible_model <- function(
+    model_name, response, analysis_data, inner_id = NULL) {
+
+  analysis_data$.log_y <- log10(analysis_data[[response]])
+
+  if (model_name %in% names(flexible_rhs)) {
+
+    model_formula <- reformulate(
+      flexible_rhs[[model_name]],
+      response = ".log_y"
+    )
+
+    fit <- lm(model_formula, data = analysis_data)
+
+    stopifnot(
+      fit$rank == ncol(model.matrix(fit))
+    )
+
+    fitted_log <- as.numeric(fitted(fit))
+
+    object <- list(
+      engine = "lm",
+      fit = fit,
+      lambda = NA_real_
+    )
+
+  } else {
+
+    stopifnot(
+      model_name %in% c("Ridge", "Lasso"),
+      length(inner_id) == nrow(analysis_data)
+    )
+
+    # Exclude the intercept: glmnet supplies its own unpenalized intercept
+    x <- model.matrix(
+      penalty_formula,
+      data = analysis_data
+    )[, -1, drop = FALSE]
+
+    alpha_value <- if (model_name == "Ridge") 0 else 1
+
+    fit <- glmnet::cv.glmnet(
+      x = x,
+      y = analysis_data$.log_y,
+      family = "gaussian",
+      alpha = alpha_value,
+      foldid = inner_id,
+      type.measure = "mse",
+      standardize = TRUE
+    )
+
+    fitted_log <- as.numeric(
+      predict(fit, newx = x, s = "lambda.min")
+    )
+
+    object <- list(
+      engine = "glmnet",
+      fit = fit,
+      columns = colnames(x),
+      lambda = fit$lambda.min
+    )
+  }
+
+  log_residuals <- analysis_data$.log_y - fitted_log
+
+  object$smearing <- mean(10^log_residuals)
+
+  stopifnot(
+    is.finite(object$smearing),
+    object$smearing > 0
+  )
+
+  object
+}
+
+predict_flexible_model <- function(object, new_data) {
+
+  if (object$engine == "lm") {
+
+    predicted_log <- as.numeric(
+      predict(object$fit, newdata = new_data)
+    )
+
+  } else {
+
+    new_x <- model.matrix(
+      penalty_formula,
+      data = new_data
+    )[, -1, drop = FALSE]
+
+    new_x <- new_x[, object$columns, drop = FALSE]
+
+    predicted_log <- as.numeric(
+      predict(
+        object$fit,
+        newx = new_x,
+        s = "lambda.min"
+      )
+    )
+  }
+
+  predicted <- 10^predicted_log * object$smearing
+
+  # Do not silently clip or discard problematic predictions
+  stopifnot(
+    all(is.finite(predicted)),
+    all(predicted > 0)
+  )
+
+  predicted
+}
+```
+
+```{r}
+
+#| label: flexible-model-cross-validation
+#| message: false
+
+flexible_oof_parts <- list()
+part_number <- 1L
+
+for (response in cv_responses) {
+
+  for (model_name in candidate_names) {
+
+    for (k in seq_len(K)) {
+
+      analysis_rows <- cv_folds[[k]]$analysis
+      assessment_rows <- cv_folds[[k]]$assessment
+
+      analysis_data <- train[analysis_rows, ]
+      assessment_data <- train[assessment_rows, ]
+
+      model <- fit_flexible_model(
+        model_name = model_name,
+        response = response,
+        analysis_data = analysis_data,
+        inner_id = inner_fold_ids[[k]]
+      )
+
+      predictions <- predict_flexible_model(
+        model,
+        assessment_data
+      )
+
+      flexible_oof_parts[[part_number]] <- data.frame(
+        row_id = assessment_data$row_id,
+        Response = response,
+        Model = model_name,
+        Fold = k,
+        Observed = assessment_data[[response]],
+        Predicted = predictions,
+        Lambda = model$lambda
+      )
+
+      part_number <- part_number + 1L
+    }
+  }
+}
+
+flexible_oof <- do.call(rbind, flexible_oof_parts)
+
+cat(
+  "Completed outer cross-validation for",
+  length(candidate_names), "candidates and",
+  length(cv_responses), "responses.\n"
+)
+```
+
+```{r}
+
+#| label: collect-model-comparisons
+
+# Original-scale linear baseline from Step 6
+original_linear_oof <- data.frame(
+  row_id = baseline_oof$row_id,
+  Response = baseline_oof$Response,
+  Model = "Original_linear",
+  Fold = baseline_oof$Fold,
+  Observed = baseline_oof$Observed,
+  Predicted = baseline_oof$Predicted,
+  Lambda = NA_real_
+)
+
+# Training-fold mean benchmark from Step 6
+mean_only_oof <- data.frame(
+  row_id = baseline_oof$row_id,
+  Response = baseline_oof$Response,
+  Model = "Mean_only",
+  Fold = baseline_oof$Fold,
+  Observed = baseline_oof$Observed,
+  Predicted = baseline_oof$Mean_only_prediction,
+  Lambda = NA_real_
+)
+
+all_model_oof <- rbind(
+  mean_only_oof,
+  original_linear_oof,
+  flexible_oof
+)
+
+model_order <- c(
+  "Mean_only",
+  "Original_linear",
+  candidate_names
+)
+
+comparison_parts <- list()
+part_number <- 1L
+
+for (response in cv_responses) {
+
+  for (model_name in model_order) {
+
+    predictions <- all_model_oof[
+      all_model_oof$Response == response &
+        all_model_oof$Model == model_name,
+    ]
+
+    stopifnot(
+      nrow(predictions) == nrow(train),
+      identical(
+        sort(predictions$row_id),
+        sort(train$row_id)
+      )
+    )
+
+    scores <- score_predictions(
+      predictions$Observed,
+      predictions$Predicted
+    )
+
+    comparison_parts[[part_number]] <- data.frame(
+      Response = response,
+      Model = model_name,
+      CV_RMSE = scores$RMSE,
+      CV_MAE = scores$MAE,
+      Nonpositive = scores$Nonpositive_predictions
+    )
+
+    part_number <- part_number + 1L
+  }
+}
+
+model_comparison <- do.call(rbind, comparison_parts)
+
+# Print one manageable table per response, in progression order
+for (response in cv_responses) {
+
+  result_table <- model_comparison[
+    model_comparison$Response == response,
+    c("Model", "CV_RMSE", "CV_MAE", "Nonpositive")
+  ]
+
+  print(
+    knitr::kable(
+      result_table,
+      digits = 4,
+      row.names = FALSE,
+      caption = paste(
+        "Original-scale validation results:",
+        baseline_labels[[response]]
+      )
+    )
+  )
+}
+```
+
+```{r}
+
+#| label: store-full-training-models
+#| message: false
+
+full_inner_id <- make_inner_folds(
+  train$regime,
+  seed = 1325L
+)
+
+flexible_models <- setNames(
+  lapply(cv_responses, function(response) {
+
+    setNames(
+      lapply(candidate_names, function(model_name) {
+
+        fit_flexible_model(
+          model_name = model_name,
+          response = response,
+          analysis_data = train,
+          inner_id = full_inner_id
+        )
+
+      }),
+      candidate_names
+    )
+
+  }),
+  cv_responses
+)
+
+cat(
+  "Stored full-training candidate fits.",
+  "No test predictions have been generated.\n"
+)
+```
+
+```{r}
+
+#| label: rank-candidate-models
+
+ranked_comparison <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    results <- model_comparison[
+      model_comparison$Response == response,
+    ]
+
+    results <- results[
+      order(results$CV_RMSE, results$CV_MAE, results$Model),
+    ]
+
+    results$Rank <- seq_len(nrow(results))
+
+    results$Gap_percent <- 100 * (
+      results$CV_RMSE / min(results$CV_RMSE) - 1
+    )
+
+    rownames(results) <- NULL
+    results
+  })
+)
+
+# Keep the three best flexible candidates for each response
+shortlist <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    results <- ranked_comparison[
+      ranked_comparison$Response == response &
+        ranked_comparison$Model %in% candidate_names,
+    ]
+
+    head(results, 3)
+  })
+)
+
+# Provisional choices: minimum original-scale CV RMSE
+provisional_model_names <- setNames(
+  vapply(cv_responses, function(response) {
+
+    results <- shortlist[shortlist$Response == response, ]
+    results$Model[1]
+
+  }, character(1)),
+  cv_responses
+)
+
+for (response in cv_responses) {
+
+  results <- ranked_comparison[
+    ranked_comparison$Response == response,
+    c("Rank", "Model", "CV_RMSE", "CV_MAE", "Gap_percent")
+  ]
+
+  print(
+    knitr::kable(
+      results,
+      digits = 5,
+      row.names = FALSE,
+      caption = paste(
+        "Model ranking:",
+        baseline_labels[[response]]
+      )
+    )
+  )
+}
+```
+
+```{r}
+
+#| label: compare-errors-by-setting
+#| fig-width: 9
+#| fig-height: 8
+
+# Retain held-out predictions for shortlisted candidates
+comparison_oof <- merge(
+  all_model_oof,
+  shortlist[c("Response", "Model")],
+  by = c("Response", "Model"),
+  sort = FALSE
+)
+
+# Attach simulation settings using the stable row IDs
+metadata_rows <- match(comparison_oof$row_id, train$row_id)
+stopifnot(!anyNA(metadata_rows))
+
+comparison_oof$Re <- train$Re[metadata_rows]
+comparison_oof$Fr <- train$Fr[metadata_rows]
+comparison_oof$St <- train$St[metadata_rows]
+comparison_oof$regime <- train$regime[metadata_rows]
+
+comparison_oof$St_range <- ifelse(
+  comparison_oof$St <= 0.3,
+  "St <= 0.3",
+  "St > 0.3"
+)
+
+comparison_oof$SE <- (
+  comparison_oof$Observed - comparison_oof$Predicted
+)^2
+
+comparison_oof$AE <- abs(
+  comparison_oof$Observed - comparison_oof$Predicted
+)
+
+# Error within each simulation regime
+regime_scores <- aggregate(
+  cbind(SE, AE) ~ Response + Model + regime,
+  data = comparison_oof,
+  FUN = mean
+)
+
+regime_scores$RMSE <- sqrt(regime_scores$SE)
+regime_scores$MAE <- regime_scores$AE
+
+regime_scores$Response_label <- factor(
+  regime_scores$Response,
+  levels = cv_responses,
+  labels = unname(baseline_labels[cv_responses])
+)
+
+ggplot(
+  regime_scores,
+  aes(x = regime, y = RMSE, color = Model)
+) +
+  geom_point(
+    position = position_dodge(width = 0.6),
+    size = 2.5
+  ) +
+  coord_flip() +
+  facet_wrap(
+    ~ Response_label,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  labs(
+    title = "Held-out RMSE within each simulation regime",
+    x = "Re / Fr regime",
+    y = "Original-scale RMSE",
+    color = "Model"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "bottom")
+
+# Error within the two St ranges
+St_scores <- aggregate(
+  cbind(SE, AE) ~ Response + Model + St_range,
+  data = comparison_oof,
+  FUN = mean
+)
+
+St_scores$RMSE <- sqrt(St_scores$SE)
+St_scores$MAE <- St_scores$AE
+
+St_counts <- aggregate(
+  row_id ~ Response + Model + St_range,
+  data = comparison_oof,
+  FUN = length
+)
+
+names(St_counts)[names(St_counts) == "row_id"] <- "N"
+
+St_scores <- merge(
+  St_scores,
+  St_counts,
+  by = c("Response", "Model", "St_range")
+)
+
+# Display the St-range results for provisional selections
+selection_map <- data.frame(
+  Response = names(provisional_model_names),
+  Model = unname(provisional_model_names)
+)
+
+selected_St_scores <- merge(
+  St_scores,
+  selection_map,
+  by = c("Response", "Model")
+)
+
+selected_St_scores$Response <- unname(
+  baseline_labels[selected_St_scores$Response]
+)
+
+knitr::kable(
+  selected_St_scores[
+    c("Response", "Model", "St_range", "N", "RMSE", "MAE")
+  ],
+  digits = 5,
+  row.names = FALSE,
+  caption = "Validation performance by St range: provisional selections"
+)
+```
+
+```{r}
+
+#| label: inspect-largest-errors
+
+worst_error_tables <- setNames(
+  lapply(cv_responses, function(response) {
+
+    # Include problematic simpler models for the shape responses
+    extra_models <- if (
+      response %in% c("skewness_volume", "kurtosis_volume")
+    ) {
+      c("Log_main", "Factor_Re")
+    } else {
+      character(0)
+    }
+
+    models_to_inspect <- unique(c(
+      shortlist$Model[shortlist$Response == response],
+      extra_models
+    ))
+
+    do.call(
+      rbind,
+      lapply(models_to_inspect, function(model_name) {
+
+        predictions <- all_model_oof[
+          all_model_oof$Response == response &
+            all_model_oof$Model == model_name,
+        ]
+
+        squared_errors <- (
+          predictions$Observed - predictions$Predicted
+        )^2
+
+        worst <- which.max(squared_errors)
+        total_error <- sum(squared_errors)
+
+        data.frame(
+          Model = model_name,
+          Row = predictions$row_id[worst],
+          Observed = predictions$Observed[worst],
+          Predicted = predictions$Predicted[worst],
+          SSE_share_percent = if (total_error > 0) {
+            100 * squared_errors[worst] / total_error
+          } else {
+            0
+          }
+        )
+      })
+    )
+  }),
+  cv_responses
+)
+
+for (response in cv_responses) {
+
+  print(
+    knitr::kable(
+      worst_error_tables[[response]],
+      digits = 5,
+      row.names = FALSE,
+      caption = paste(
+        "Largest individual prediction errors:",
+        baseline_labels[[response]]
+      )
+    )
+  )
+}
+```
+
+```{r}
+
+#| label: diagnose-shortlisted-models
+#| fig-width: 8
+#| fig-height: 7
+
+plot_candidate_diagnostics <- function(
+    object, response, model_name) {
+
+  old_par <- par(
+    mfrow = c(2, 2),
+    oma = c(0, 0, 3, 0),
+    mar = c(5, 4, 2, 1)
+  )
+
+  on.exit(par(old_par))
+
+  # Remove the smearing correction to recover fitted log values
+  fitted_log <- log10(
+    predict_flexible_model(object, train) / object$smearing
+  )
+
+  log_residuals <- log10(train[[response]]) - fitted_log
+
+  # Residuals versus fitted log response
+  plot(
+    fitted_log, log_residuals,
+    xlab = "Fitted log10(response)",
+    ylab = "Log-scale residual",
+    main = "Residuals vs fitted"
+  )
+
+  abline(h = 0, lty = 2, col = "grey50")
+  lines(lowess(fitted_log, log_residuals), col = "red")
+
+  # Normal Q-Q plot
+  qqnorm(
+    log_residuals,
+    main = "Normal Q-Q: log-scale residuals"
+  )
+
+  qqline(log_residuals, col = "red")
+
+  # Remaining St structure
+  plot(
+    train$log10_St, log_residuals,
+    xlab = "log10(St)",
+    ylab = "Log-scale residual",
+    main = "Residuals vs log10(St)"
+  )
+
+  abline(h = 0, lty = 2, col = "grey50")
+  lines(lowess(train$log10_St, log_residuals), col = "red")
+
+  # Differences between simulation regimes
+  boxplot(
+    log_residuals ~ train$regime,
+    las = 2,
+    cex.axis = 0.65,
+    xlab = "",
+    ylab = "Log-scale residual",
+    main = "Residuals by Re / Fr regime"
+  )
+
+  abline(h = 0, lty = 2, col = "grey50")
+
+  mtext(
+    paste(baseline_labels[[response]], ":", model_name),
+    outer = TRUE,
+    line = 1,
+    font = 2
+  )
+}
+
+for (response in cv_responses) {
+
+  models_to_diagnose <- head(
+    shortlist$Model[shortlist$Response == response],
+    2
+  )
+
+  for (model_name in models_to_diagnose) {
+
+    plot_candidate_diagnostics(
+      flexible_models[[response]][[model_name]],
+      response,
+      model_name
+    )
+  }
+}
+```
+
+```{r}
+
+#| label: store-provisional-selections
+
+selected_model_names <- provisional_model_names
+
+selected_models <- setNames(
+  lapply(cv_responses, function(response) {
+
+    flexible_models[[response]][[
+      selected_model_names[[response]]
+    ]]
+
+  }),
+  cv_responses
+)
+
+# Preserve the corresponding held-out predictions
+selected_oof <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    all_model_oof[
+      all_model_oof$Response == response &
+        all_model_oof$Model == selected_model_names[[response]],
+    ]
+  })
+)
+
+selection_summary <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    chosen <- model_comparison[
+      model_comparison$Response == response &
+        model_comparison$Model == selected_model_names[[response]],
+    ]
+
+    baseline_rmse <- model_comparison$CV_RMSE[
+      model_comparison$Response == response &
+        model_comparison$Model == "Original_linear"
+    ]
+
+    data.frame(
+      Response = baseline_labels[[response]],
+      Model = chosen$Model,
+      CV_RMSE = chosen$CV_RMSE,
+      CV_MAE = chosen$CV_MAE,
+      RMSE_reduction_percent = 100 * (
+        1 - chosen$CV_RMSE / baseline_rmse
+      )
+    )
+  })
+)
+
+knitr::kable(
+  selection_summary,
+  digits = 5,
+  row.names = FALSE,
+  caption = "Provisional selections and improvement over the original linear baseline"
+)
+```
