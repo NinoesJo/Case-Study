@@ -2081,3 +2081,958 @@ knitr::kable(
   caption = "Provisional selections and improvement over the original linear baseline"
 )
 ```
+
+```{r}
+
+ggplot(
+  regime_scores,
+  aes(x = RMSE, y = regime, color = Model)
+) +
+  geom_point(
+    position = position_dodge(width = 0.6),
+    size = 2.5
+  ) +
+  facet_wrap(
+    ~ Response_label,
+    scales = "free_x",
+    ncol = 2
+  ) +
+  labs(
+    title = "Held-out RMSE within each simulation regime",
+    x = "Original-scale RMSE",
+    y = "Re / Fr regime",
+    color = "Model"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+
+#| label: scientific-comparison-settings
+
+B <- 500L
+set.seed(9325)
+
+# Common multipliers preserve correspondence across the four responses
+wild_weights <- matrix(
+  sample(c(-1, 1), nrow(train) * B, replace = TRUE),
+  nrow = nrow(train),
+  ncol = B
+)
+
+prepare_effect_data <- function(d) {
+
+  d$Re_factor <- factor(d$Re, levels = levels(train$Re_factor))
+  d$Fr_factor <- factor(d$Fr, levels = levels(train$Fr_factor))
+
+  d$regime <- factor(
+    as.character(interaction(
+      d$Re_factor, d$Fr_factor,
+      drop = TRUE, sep = " / "
+    )),
+    levels = levels(train$regime)
+  )
+
+  d$log10_Re <- log10(d$Re)
+  d$log10_St <- log10(d$St)
+  d$inv_Fr <- 1 / d$Fr
+
+  stopifnot(!anyNA(d$regime))
+  d
+}
+
+regimes <- unique(train[c("Re", "Fr")])
+regimes <- regimes[order(regimes$Re, regimes$Fr), ]
+
+# Curves stay inside each observed regime's training range
+curve_grid <- do.call(
+  rbind,
+  lapply(seq_len(nrow(regimes)), function(j) {
+
+    re <- regimes$Re[j]
+    fr <- regimes$Fr[j]
+
+    observed_St <- train$St[
+      train$Re == re & train$Fr == fr
+    ]
+
+    data.frame(
+      Re = re,
+      Fr = fr,
+      St = 10^seq(
+        log10(min(observed_St)),
+        log10(max(observed_St)),
+        length.out = 60
+      )
+    )
+  })
+)
+
+curve_grid <- prepare_effect_data(curve_grid)
+
+# Common settings for numerical comparisons
+contrast_grid <- do.call(
+  rbind,
+  lapply(seq_len(nrow(regimes)), function(j) {
+    data.frame(
+      Re = regimes$Re[j],
+      Fr = regimes$Fr[j],
+      St = c(0.1, 0.5)
+    )
+  })
+)
+
+contrast_grid <- prepare_effect_data(contrast_grid)
+
+# Verify that comparison settings are within training ranges
+for (j in seq_len(nrow(contrast_grid))) {
+
+  d <- contrast_grid[j, ]
+  observed_St <- train$St[train$regime == d$regime]
+
+  stopifnot(
+    d$St >= min(observed_St),
+    d$St <= max(observed_St)
+  )
+}
+
+find_setting <- function(re, fr, st) {
+
+  i <- which(
+    contrast_grid$Re == re &
+      contrast_grid$Fr == fr &
+      contrast_grid$St == st
+  )
+
+  stopifnot(length(i) == 1L)
+  i
+}
+
+contrast_specs <- list()
+
+# Strong gravity / no gravity at fixed Re and St
+for (re in sort(unique(train$Re))) {
+
+  contrast_specs[[length(contrast_specs) + 1L]] <- data.frame(
+    Effect = "Gravity",
+    Comparison = paste("Fr 0.052 / Inf; Re", re, "; St 0.5"),
+    Reference = find_setting(re, Inf, 0.5),
+    Comparison_row = find_setting(re, 0.052, 0.5)
+  )
+}
+
+# Higher Re / Re 90 at fixed Fr and St
+for (fr in sort(unique(train$Fr))) {
+
+  available_Re <- sort(unique(train$Re[train$Fr == fr]))
+
+  for (re in available_Re[available_Re != 90]) {
+
+    contrast_specs[[length(contrast_specs) + 1L]] <- data.frame(
+      Effect = "Re",
+      Comparison = paste("Re", re, "/ 90; Fr", fr, "; St 0.5"),
+      Reference = find_setting(90, fr, 0.5),
+      Comparison_row = find_setting(re, fr, 0.5)
+    )
+  }
+}
+
+# St 0.5 / St 0.1 within each observed regime
+for (j in seq_len(nrow(regimes))) {
+
+  re <- regimes$Re[j]
+  fr <- regimes$Fr[j]
+
+  contrast_specs[[length(contrast_specs) + 1L]] <- data.frame(
+    Effect = "St",
+    Comparison = paste("St 0.5 / 0.1; Re", re, "; Fr", fr),
+    Reference = find_setting(re, fr, 0.1),
+    Comparison_row = find_setting(re, fr, 0.5)
+  )
+}
+
+contrast_specs <- do.call(rbind, contrast_specs)
+all_settings <- rbind(curve_grid, contrast_grid)
+```
+
+```{r}
+
+#| label: scientific-bootstrap
+
+science_results <- setNames(
+  lapply(cv_responses, function(response) {
+
+    object <- selected_models[[response]]
+
+    # This procedure is for the current four unpenalized selections
+    stopifnot(object$engine == "lm")
+
+    fit <- object$fit
+    X <- model.matrix(fit)
+
+    # Reuse the fitted basis, including the original spline knots
+    Xnew <- model.matrix(
+      delete.response(terms(fit)),
+      data = all_settings,
+      contrasts.arg = fit$contrasts,
+      xlev = fit$xlevels
+    )
+
+    Xnew <- Xnew[, colnames(X), drop = FALSE]
+
+    h <- hatvalues(fit)
+
+    stopifnot(
+      fit$rank == ncol(X),
+      nrow(X) == nrow(train),
+      all(h < 1)
+    )
+
+    # Leverage-adjusted residuals on the log-response scale
+    adjusted_residuals <- residuals(fit) / sqrt(1 - h)
+
+    qrX <- qr(X)
+
+    coefficient_draws <- matrix(
+      NA_real_,
+      nrow = ncol(X),
+      ncol = B
+    )
+
+    smearing_draws <- numeric(B)
+
+    for (b in seq_len(B)) {
+
+      y_boot <- as.numeric(fitted(fit)) +
+        adjusted_residuals * wild_weights[, b]
+
+      beta_boot <- qr.coef(qrX, y_boot)
+
+      residual_boot <- y_boot -
+        as.numeric(X %*% beta_boot)
+
+      coefficient_draws[, b] <- beta_boot
+      smearing_draws[b] <- mean(10^residual_boot)
+    }
+
+    eta_draws <- Xnew %*% coefficient_draws
+
+    prediction_draws <- sweep(
+      10^eta_draws,
+      2,
+      smearing_draws,
+      "*"
+    )
+
+    stopifnot(all(is.finite(prediction_draws)))
+
+    point_estimates <- predict_flexible_model(
+      object,
+      all_settings
+    )
+
+    # Curve estimates and pointwise percentile bands
+    curve_rows <- seq_len(nrow(curve_grid))
+
+    curves <- curve_grid
+    curves$Response <- response
+    curves$Estimate <- point_estimates[curve_rows]
+
+    curves$Lower <- apply(
+      prediction_draws[curve_rows, , drop = FALSE],
+      1, quantile, probs = 0.025
+    )
+
+    curves$Upper <- apply(
+      prediction_draws[curve_rows, , drop = FALSE],
+      1, quantile, probs = 0.975
+    )
+
+    # Ratios: comparison setting / reference setting
+    reference_rows <- nrow(curve_grid) +
+      contrast_specs$Reference
+
+    comparison_rows <- nrow(curve_grid) +
+      contrast_specs$Comparison_row
+
+    # The common smearing factor cancels within each ratio
+    ratio_draws <- 10^(
+      eta_draws[comparison_rows, , drop = FALSE] -
+        eta_draws[reference_rows, , drop = FALSE]
+    )
+
+    contrasts <- contrast_specs[c("Effect", "Comparison")]
+    contrasts$Response <- response
+
+    contrasts$Ratio <- point_estimates[comparison_rows] /
+      point_estimates[reference_rows]
+
+    contrasts$Lower <- apply(
+      ratio_draws, 1, quantile, probs = 0.025
+    )
+
+    contrasts$Upper <- apply(
+      ratio_draws, 1, quantile, probs = 0.975
+    )
+
+    list(curves = curves, contrasts = contrasts)
+  }),
+  cv_responses
+)
+
+effect_curves <- do.call(
+  rbind,
+  lapply(science_results, function(x) x$curves)
+)
+
+effect_contrasts <- do.call(
+  rbind,
+  lapply(science_results, function(x) x$contrasts)
+)
+
+cat(
+  "Calculated fitted curves and",
+  B,
+  "wild-bootstrap draws per response.\n"
+)
+```
+
+```{r}
+
+#| label: scientific-effect-curves
+#| fig-width: 9
+#| fig-height: 4.5
+
+for (response in cv_responses) {
+
+  plot_data <- effect_curves[
+    effect_curves$Response == response,
+  ]
+
+  observed <- train[
+    c("St", "Re_factor", "Fr_factor")
+  ]
+
+  observed$Value <- train[[response]]
+
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = St,
+      y = Estimate,
+      color = Re_factor,
+      group = Re_factor
+    )
+  ) +
+    geom_ribbon(
+      aes(ymin = Lower, ymax = Upper, fill = Re_factor),
+      alpha = 0.15,
+      color = NA
+    ) +
+    geom_line(linewidth = 0.7) +
+    geom_point(
+      data = observed,
+      aes(x = St, y = Value, color = Re_factor),
+      inherit.aes = FALSE,
+      size = 1.3,
+      alpha = 0.6
+    ) +
+    facet_wrap(
+      ~ Fr_factor,
+      nrow = 1,
+      labeller = label_both
+    ) +
+    scale_color_manual(values = Re_colors) +
+    scale_fill_manual(values = Re_colors) +
+    scale_x_log10(
+      breaks = c(0.05, 0.1, 0.3, 1, 3)
+    ) +
+    scale_y_log10() +
+    labs(
+      title = paste("Fitted relationship:", baseline_labels[[response]]),
+      subtitle = "Approximate model-conditional pointwise 95% bands",
+      x = "Stokes number (log scale)",
+      y = paste(baseline_labels[[response]], "(log scale)"),
+      color = "Re",
+      fill = "Re"
+    ) +
+    theme_bw(base_size = 10) +
+    theme(legend.position = "top")
+
+  print(p)
+}
+```
+
+```{r}
+
+#| label: scientific-effect-ratios
+#| results: asis
+
+for (response in cv_responses) {
+
+  results <- effect_contrasts[
+    effect_contrasts$Response == response,
+    c("Effect", "Comparison", "Ratio", "Lower", "Upper")
+  ]
+
+  cat("\n\n")
+
+  print(
+    knitr::kable(
+      results,
+      digits = 3,
+      row.names = FALSE,
+      caption = paste(
+        "Fitted effect ratios with approximate pointwise 95% intervals:",
+        baseline_labels[[response]]
+      )
+    )
+  )
+
+  cat("\n\n")
+}
+```
+
+```{r}
+
+#| label: scientific-sensitivity-check
+
+sensitivity_results <- setNames(
+  lapply(cv_responses, function(response) {
+
+    predictions <- selected_oof[
+      selected_oof$Response == response,
+    ]
+
+    omitted_row <- predictions$row_id[
+      which.max(
+        (predictions$Observed - predictions$Predicted)^2
+      )
+    ]
+
+    reduced <- train[train$row_id != omitted_row, ]
+    reduced$.log_y <- log10(reduced[[response]])
+
+    reduced_fit <- lm(
+      formula(selected_models[[response]]$fit),
+      data = reduced
+    )
+
+    stopifnot(
+      reduced_fit$rank == ncol(model.matrix(reduced_fit))
+    )
+
+    reduced_object <- list(
+      engine = "lm",
+      fit = reduced_fit,
+      smearing = mean(10^residuals(reduced_fit))
+    )
+
+    # Ensure comparisons remain within the reduced data's ranges
+    for (j in seq_len(nrow(contrast_grid))) {
+
+      d <- contrast_grid[j, ]
+      observed_St <- reduced$St[reduced$regime == d$regime]
+
+      stopifnot(
+        d$St >= min(observed_St),
+        d$St <= max(observed_St)
+      )
+    }
+
+    reduced_predictions <- predict_flexible_model(
+      reduced_object,
+      contrast_grid
+    )
+
+    results <- science_results[[response]]$contrasts
+    results$Omitted_row <- omitted_row
+
+    results$Reduced_ratio <-
+      reduced_predictions[contrast_specs$Comparison_row] /
+      reduced_predictions[contrast_specs$Reference]
+
+    results$Ratio_change_percent <- 100 * (
+      results$Reduced_ratio / results$Ratio - 1
+    )
+
+    results
+  }),
+  cv_responses
+)
+
+sensitivity_summary <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    results <- sensitivity_results[[response]]
+    largest <- which.max(abs(results$Ratio_change_percent))
+
+    data.frame(
+      Response = baseline_labels[[response]],
+      Omitted_row = results$Omitted_row[largest],
+      Largest_change_percent = abs(
+        results$Ratio_change_percent[largest]
+      ),
+      Comparison = results$Comparison[largest]
+    )
+  })
+)
+
+knitr::kable(
+  sensitivity_summary,
+  digits = 2,
+  row.names = FALSE,
+  caption = "Sensitivity of scientific ratios to one difficult observation"
+)
+```
+
+```{r}
+
+#| label: final-prediction-rule
+
+final_model_names <- selected_model_names
+
+# Align held-out predictions with the original training-row order
+oof_predictions <- as.data.frame(
+  matrix(
+    NA_real_,
+    nrow = nrow(train),
+    ncol = length(cv_responses),
+    dimnames = list(NULL, cv_responses)
+  )
+)
+
+for (response in cv_responses) {
+
+  predictions <- selected_oof[
+    selected_oof$Response == response,
+  ]
+
+  stopifnot(
+    nrow(predictions) == nrow(train),
+    !anyDuplicated(predictions$row_id)
+  )
+
+  matched_rows <- match(train$row_id, predictions$row_id)
+  stopifnot(!anyNA(matched_rows))
+
+  oof_predictions[[response]] <-
+    predictions$Predicted[matched_rows]
+}
+
+adjust_shape <- function(predictions, rule = "Cap_skewness") {
+
+  p <- as.data.frame(predictions)
+
+  stopifnot(
+    all(is.finite(as.matrix(p[cv_responses]))),
+    all(p$mean_volume > 0),
+    all(p$sd_volume > 0),
+    all(p$kurtosis_volume >= 1)
+  )
+
+  if (rule == "Raise_kurtosis") {
+
+    p$kurtosis_volume <- pmax(
+      p$kurtosis_volume,
+      p$skewness_volume^2 + 1
+    )
+
+  } else if (rule == "Cap_skewness") {
+
+    p$skewness_volume <- sign(p$skewness_volume) *
+      pmin(
+        abs(p$skewness_volume),
+        sqrt(p$kurtosis_volume - 1)
+      )
+
+  } else {
+
+    stopifnot(rule == "Unadjusted")
+  }
+
+  p
+}
+
+rules <- c(
+  "Unadjusted",
+  "Raise_kurtosis",
+  "Cap_skewness"
+)
+
+oof_by_rule <- setNames(
+  lapply(rules, function(rule) {
+    adjust_shape(oof_predictions, rule)
+  }),
+  rules
+)
+
+shape_rule_scores <- do.call(
+  rbind,
+  lapply(
+    c("skewness_volume", "kurtosis_volume"),
+    function(response) {
+
+      do.call(
+        rbind,
+        lapply(rules, function(rule) {
+
+          scores <- score_predictions(
+            train[[response]],
+            oof_by_rule[[rule]][[response]]
+          )
+
+          data.frame(
+            Response = baseline_labels[[response]],
+            Rule = rule,
+            CV_RMSE = scores$RMSE,
+            CV_MAE = scores$MAE
+          )
+        })
+      )
+    }
+  )
+)
+
+final_rule <- "Cap_skewness"
+final_oof_predictions <- oof_by_rule[[final_rule]]
+
+# Confirm that this adjustment does not worsen either shape RMSE
+# for the current data and selected models.
+for (response in c("skewness_volume", "kurtosis_volume")) {
+
+  stopifnot(
+    score_predictions(
+      train[[response]],
+      final_oof_predictions[[response]]
+    )$RMSE <=
+      score_predictions(
+        train[[response]],
+        oof_predictions[[response]]
+      )$RMSE + 1e-10
+  )
+}
+
+knitr::kable(
+  shape_rule_scores,
+  digits = 5,
+  row.names = FALSE,
+  caption = "Held-out evaluation of the shape adjustment"
+)
+```
+
+```{r}
+
+#| label: refit-final-models
+
+final_models <- setNames(
+  lapply(cv_responses, function(response) {
+
+    previous_model <- selected_models[[response]]
+
+    # The current four selected models are unpenalized lm fits
+    stopifnot(previous_model$engine == "lm")
+
+    fitting_data <- train
+    fitting_data$.log_y <- log10(fitting_data[[response]])
+
+    fit <- lm(
+      formula(previous_model$fit),
+      data = fitting_data
+    )
+
+    stopifnot(
+      fit$rank == ncol(model.matrix(fit))
+    )
+
+    list(
+      engine = "lm",
+      fit = fit,
+      smearing = mean(10^residuals(fit)),
+      lambda = NA_real_
+    )
+  }),
+  cv_responses
+)
+
+knitr::kable(
+  data.frame(
+    Response = unname(baseline_labels[cv_responses]),
+    Model = unname(final_model_names[cv_responses]),
+    Training_rows = nrow(train)
+  ),
+  row.names = FALSE,
+  caption = "Final models refitted using all training observations"
+)
+```
+
+```{r}
+
+#| label: generate-final-test-predictions
+
+# Begin from the original test data and preserve its order
+final_test <- prepare_effect_data(test_raw)
+final_test$test_row <- seq_len(nrow(test_raw))
+
+stopifnot(
+  identical(
+    final_test[predictors],
+    test_raw[predictors]
+  )
+)
+
+final_test$Training_St_min <- vapply(
+  as.character(final_test$regime),
+  function(g) min(train$St[train$regime == g]),
+  numeric(1)
+)
+
+final_test$Training_St_max <- vapply(
+  as.character(final_test$regime),
+  function(g) max(train$St[train$regime == g]),
+  numeric(1)
+)
+
+final_test$Extrapolation <-
+  final_test$St < final_test$Training_St_min |
+  final_test$St > final_test$Training_St_max
+
+raw_test_predictions <- as.data.frame(
+  setNames(
+    lapply(cv_responses, function(response) {
+
+      predict_flexible_model(
+        final_models[[response]],
+        final_test
+      )
+
+    }),
+    cv_responses
+  )
+)
+
+final_test_predictions <- adjust_shape(
+  raw_test_predictions,
+  final_rule
+)
+
+knitr::kable(
+  final_test[
+    final_test$Extrapolation,
+    c(
+      "test_row", "Re", "Fr", "St",
+      "Training_St_min", "Training_St_max"
+    )
+  ],
+  row.names = FALSE,
+  caption = "Test settings requiring within-regime St extrapolation"
+)
+```
+
+```{r}
+
+#| label: audit-final-predictions
+
+count_pearson_violations <- function(p) {
+
+  bound <- p$skewness_volume^2 + 1
+
+  # Small tolerance for floating-point arithmetic
+  tolerance <- 1e-10 * pmax(
+    1,
+    bound,
+    p$kurtosis_volume
+  )
+
+  sum(p$kurtosis_volume < bound - tolerance)
+}
+
+prediction_audit <- data.frame(
+  Stage = c(
+    "OOF before adjustment",
+    "OOF after adjustment",
+    "Test before adjustment",
+    "Test after adjustment"
+  ),
+  Rows = c(
+    nrow(train), nrow(train),
+    nrow(test_raw), nrow(test_raw)
+  ),
+  Pearson_violations = c(
+    count_pearson_violations(oof_predictions),
+    count_pearson_violations(final_oof_predictions),
+    count_pearson_violations(raw_test_predictions),
+    count_pearson_violations(final_test_predictions)
+  )
+)
+
+stopifnot(
+  nrow(final_test_predictions) == nrow(test_raw),
+  all(is.finite(as.matrix(final_test_predictions))),
+  all(final_test_predictions$mean_volume > 0),
+  all(final_test_predictions$sd_volume > 0),
+  count_pearson_violations(final_test_predictions) == 0L
+)
+
+# Updated development-CV scores for the final prediction procedure
+final_cv_summary <- do.call(
+  rbind,
+  lapply(cv_responses, function(response) {
+
+    scores <- score_predictions(
+      train[[response]],
+      final_oof_predictions[[response]]
+    )
+
+    data.frame(
+      Response = baseline_labels[[response]],
+      Model = final_model_names[[response]],
+      CV_RMSE = scores$RMSE,
+      CV_MAE = scores$MAE
+    )
+  })
+)
+
+# Target-only tables, in original test-row order
+predictions_sd <- data.frame(
+  mean = final_test_predictions$mean_volume,
+  sd = final_test_predictions$sd_volume,
+  skewness = final_test_predictions$skewness_volume,
+  kurtosis = final_test_predictions$kurtosis_volume
+)
+
+predictions_variance <- data.frame(
+  mean = predictions_sd$mean,
+  variance = predictions_sd$sd^2,
+  skewness = predictions_sd$skewness,
+  kurtosis = predictions_sd$kurtosis
+)
+
+# Detailed working table, separate from target-only exports
+prediction_details <- data.frame(
+  test_row = final_test$test_row,
+  final_test[predictors],
+  mean = predictions_sd$mean,
+  sd = predictions_sd$sd,
+  variance = predictions_variance$variance,
+  skewness = predictions_sd$skewness,
+  kurtosis = predictions_sd$kurtosis,
+  Skewness_adjusted = abs(
+    raw_test_predictions$skewness_volume -
+      predictions_sd$skewness
+  ) > 1e-10,
+  Extrapolation = final_test$Extrapolation
+)
+
+knitr::kable(
+  prediction_audit,
+  row.names = FALSE,
+  caption = "Prediction consistency checks"
+)
+
+knitr::kable(
+  final_cv_summary,
+  digits = 5,
+  row.names = FALSE,
+  caption = "Development-CV performance of the final prediction procedure"
+)
+
+knitr::kable(
+  head(predictions_sd),
+  digits = 6,
+  row.names = FALSE,
+  caption = "First six final test predictions"
+)
+```
+
+```{r}
+
+#| label: export-final-predictions
+
+output_dir <- "outputs"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+write.csv(
+  predictions_sd,
+  file.path(output_dir, "predictions_sd.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  predictions_variance,
+  file.path(output_dir, "predictions_variance.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  prediction_details,
+  file.path(output_dir, "prediction_details.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  final_cv_summary,
+  file.path(output_dir, "final_cv_summary.csv"),
+  row.names = FALSE
+)
+
+saveRDS(
+  list(
+    models = final_models,
+    model_names = final_model_names,
+    prediction_rule = final_rule,
+    cv_metrics = final_cv_summary
+  ),
+  file.path(output_dir, "final_model_bundle.rds")
+)
+
+# Reopen and verify the saved SD-version predictions
+saved_predictions <- read.csv(
+  file.path(output_dir, "predictions_sd.csv")
+)
+
+stopifnot(
+  nrow(saved_predictions) == nrow(test_raw),
+  identical(names(saved_predictions), names(predictions_sd)),
+  isTRUE(all.equal(
+    as.matrix(saved_predictions),
+    as.matrix(predictions_sd),
+    tolerance = 1e-10,
+    check.attributes = FALSE
+  ))
+)
+
+cat(
+  "Saved", nrow(saved_predictions),
+  "prediction rows in the outputs folder.\n"
+)
+```
+
+```{r}
+
+# Attach final predictions to the original test rows
+test_with_predictions <- cbind(
+  test_raw,
+  predictions_sd
+)
+
+stopifnot(
+  nrow(test_with_predictions) == nrow(test_raw)
+)
+
+dir.create("outputs", showWarnings = FALSE)
+
+write.csv(
+  test_with_predictions,
+  "outputs/test.csv",
+  row.names = FALSE
+)
+
+knitr::kable(
+  head(test_with_predictions),
+  digits = 6,
+  caption = "Test observations with final predictions"
+)
+```
