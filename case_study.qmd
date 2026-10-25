@@ -2,28 +2,16 @@
 title: "STA 325 Case Study: Particle Clusters in Turbulence"
 author: "Johan Nino Espino"
 date: "October 25, 2026"
-format:
-  pdf:
-    pdf-engine: xelatex
-    toc: true
-    number-sections: true
-    geometry: margin=1in
-    fig-width: 7
-    fig-height: 4
-execute:
-  warning: false
-  message: false
+format: pdf
+output: pdf_document
+font-size: 8px
 ---
 
 # Setup
 
-**Goal.** Predict four summaries of the particle cluster-volume distribution
-(mean, variance, skewness, kurtosis) from the Reynolds number Re, the Froude
-number Fr and the Stokes number St, and explain how each input affects them.
-The emphasis is on interpretable models that still predict well.
+**Goal.** Predict four summaries of the particle cluster-volume distribution (mean, variance, skewness, kurtosis) from the Reynolds number Re, the Froude number Fr and the Stokes number St, and explain how each input affects them. The emphasis is on interpretable models that still predict well.
 
-Put `data-train.csv` and `data-test.csv` in a folder called `data` next to
-this file.
+Put `data-train.csv` and `data-test.csv` in a folder called `data` next to this file.
 
 ```{r}
 #| label: packages
@@ -46,8 +34,7 @@ colSums(is.na(train))   # no missing values; read.csv reads "Inf" as Inf
 
 ## Convert raw moments to the four targets
 
-The data give the raw moments $m_k = E[X^k]$. With $\mu = m_1$, expanding
-$E[(X-\mu)^k]$ gives the central moments:
+The data give the raw moments $m_k = E[X^k]$. With $\mu = m_1$, expanding $E[(X-\mu)^k]$ gives the central moments:
 
 $$
 \sigma^2 = m_2 - m_1^2, \qquad
@@ -77,8 +64,7 @@ sapply(train[, c("mean", "variance", "skewness", "kurtosis")],
 
 ## Encode the inputs
 
-Re and Fr each take only three values, so both are treated as categories
-(factors). St takes 14 values and stays numeric.
+Re and Fr each take only three values, so both are treated as categories (factors). St takes 14 values and stays numeric.
 
 ```{r}
 #| label: encode
@@ -96,8 +82,7 @@ table(Re = train$Re_f, Fr = train$Fr_f)   # training runs per setting
 table(Re = test$Re_f,  Fr = test$Fr_f)    # test runs per setting
 ```
 
-Every test setting of (Re, Fr) also appears in training. There are no runs
-at Re = 398 with Fr = 0.3.
+Every test setting of (Re, Fr) also appears in training. There are no runs at Re = 398 with Fr = 0.3.
 
 # Exploratory data analysis
 
@@ -143,12 +128,7 @@ long |>
             log_sd_ratio = signif(max(log_sd) / min(log_sd), 2))
 ```
 
-**Decision: model the log of every target.** On the raw scale the targets
-span up to about ten million-fold and their spread differs enormously
-between settings; on the log scale the spread is comparable. The log scale
-also turns the multiplicative effects (for example, Re changes the mean
-roughly ten-fold per step) into additive ones, and back-transformed
-predictions are always positive.
+**Decision: model the log of every target.** On the raw scale the targets span up to about ten million-fold and their spread differs enormously between settings; on the log scale the spread is comparable. The log scale also turns the multiplicative effects (for example, Re changes the mean roughly ten-fold per step) into additive ones, and back-transformed predictions are always positive.
 
 ```{r}
 #| label: log-targets
@@ -185,10 +165,7 @@ ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   theme(legend.position = "bottom")
 ```
 
-Every curve changes sharply between St = 0.05 and 0.2 and then slowly, so
-the St effect is clearly **nonlinear**. Using log(St) spreads out the small
-St values and makes the curves smoother, but they still bend. This suggests
-log(St) plus polynomial terms.
+Every curve changes sharply between St = 0.05 and 0.2 and then slowly, so the St effect is clearly **nonlinear**. Using log(St) spreads out the small St values and makes the curves smoother, but they still bend. This suggests log(St) plus polynomial terms.
 
 ## Interactions: does the effect of one input depend on another?
 
@@ -206,18 +183,11 @@ ggplot(cell_means, aes(Re_f, avg, color = Fr_f, group = Fr_f)) +
   labs(x = "Re", y = "Average log(target) over St")
 ```
 
-Parallel lines would mean no interaction. For variance, skewness and
-kurtosis the lines are far from parallel: strong gravity (Fr = 0.052) has a
-large effect at Re = 90, a smaller one at Re = 224 and almost none at
-Re = 398. So **Re and Fr interact**. In the St plots above, the
-strong-gravity curves for the mean also have a different shape (they
-flatten at large St), a possible **St $\times$ Fr interaction**.
+Parallel lines would mean no interaction. For variance, skewness and kurtosis the lines are far from parallel: strong gravity (Fr = 0.052) has a large effect at Re = 90, a smaller one at Re = 224 and almost none at Re = 398. So **Re and Fr interact**. In the St plots above, the strong-gravity curves for the mean also have a different shape (they flatten at large St), a possible **St** $\times$ Fr interaction.
 
 ## Fr = 0.3 behaves like no gravity
 
-In every panel, the Fr = 0.3 and Fr = Inf curves lie on top of each other;
-only strong gravity (Fr = 0.052) stands apart. A simpler, physically
-meaningful coding is a two-level gravity variable:
+In every panel, the Fr = 0.3 and Fr = Inf curves lie on top of each other; only strong gravity (Fr = 0.052) stands apart. A simpler, physically meaningful coding is a two-level gravity variable:
 
 ```{r}
 #| label: gravity
@@ -231,9 +201,7 @@ test  <- add_grav(test)
 table(Re = train$Re_f, Gravity = train$Grav)
 ```
 
-This also removes the empty Re = 398, Fr = 0.3 cell, so every Re $\times$
-gravity combination has data. (Section 4 checks that this coding predicts
-as well as the three-level Fr.)
+This also removes the empty Re = 398, Fr = 0.3 cell, so every Re $\times$ gravity combination has data. (Section 4 checks that this coding predicts as well as the three-level Fr.)
 
 ## Skewness and kurtosis carry the same information
 
@@ -247,27 +215,21 @@ coef(lm(log_kurtosis ~ log_skewness, data = train))
 cor(train$log_kurtosis, train$log_skewness)
 ```
 
-log(kurtosis) $\approx$ 2 log(skewness), so kurtosis $\approx$ skewness$^2$:
-expect the two models to tell the same story.
+log(kurtosis) $\approx$ 2 log(skewness), so kurtosis $\approx$ skewness$^2$: expect the two models to tell the same story.
 
 ## EDA summary
 
-- **Transformation:** log of every target; log(St) as the St variable.
-- **Nonlinearity:** strong in St, even on the log scale $\Rightarrow$
-  polynomial terms in log(St).
-- **Interactions:** Re $\times$ gravity (clear); St $\times$ gravity (possible,
-  mainly for the mean).
-- **Simplification:** Fr = 0.3 $\approx$ no gravity $\Rightarrow$ two-level
-  gravity variable.
+-   **Transformation:** log of every target; log(St) as the St variable.
+-   **Nonlinearity:** strong in St, even on the log scale $\Rightarrow$ polynomial terms in log(St).
+-   **Interactions:** Re $\times$ gravity (clear); St $\times$ gravity (possible, mainly for the mean).
+-   **Simplification:** Fr = 0.3 $\approx$ no gravity $\Rightarrow$ two-level gravity variable.
 
 # Candidate models
 
-All models use log(target) as the response. Each step adds one idea, from
-simplest to most complex. The same models are fit for each of the four
-targets.
+All models use log(target) as the response. Each step adds one idea, from simplest to most complex. The same models are fit for each of the four targets.
 
 | Model | Formula (right-hand side) | Idea added |
-|---|---|---|
+|------------------------|------------------------|------------------------|
 | M1 Linear | St + Re + Grav | Baseline: additive and linear |
 | M2 Log St | log(St) + Re + Grav | Log-transformed St |
 | M3 Polynomial | poly(log St, 3) + Re + Grav | Curved St effect |
@@ -328,17 +290,13 @@ train_fit |>
   knitr::kable(caption = "Adjusted R-squared")
 ```
 
-Training error always falls as models get more complex, so it cannot be
-used to choose a model. Cross-validation estimates error on new data.
+Training error always falls as models get more complex, so it cannot be used to choose a model. Cross-validation estimates error on new data.
 
 # Cross-validation and model selection
 
 ## 10-fold cross-validation
 
-Each run is held out once; the model is fit on the other nine folds and
-predicts the held-out runs. For lasso and ridge, the penalty $\lambda$ is
-chosen by an inner cross-validation inside each training fold, so their CV
-error is honest too.
+Each run is held out once; the model is fit on the other nine folds and predicts the held-out runs. For lasso and ridge, the penalty $\lambda$ is chosen by an inner cross-validation inside each training fold, so their CV error is honest too.
 
 ```{r}
 #| label: cv
@@ -378,16 +336,9 @@ cv_results |>
   knitr::kable(caption = "10-fold CV RMSE (log scale; lower is better)")
 ```
 
-An RMSE of $r$ on the log scale means predictions are typically off by a
-factor of about $e^r$ (for example, 0.10 $\approx$ 10%).
+An RMSE of $r$ on the log scale means predictions are typically off by a factor of about $e^r$ (for example, 0.10 $\approx$ 10%).
 
-Adding the Re $\times$ gravity interaction (M4) cuts the CV error for
-variance, skewness and kurtosis by more than half; the polynomial and log
-terms alone (M2, M3) barely help. Ridge (M8) does poorly because it shrinks
-**every** coefficient toward zero, including the large and real Re and
-gravity effects, which adds bias. Lasso (M7) can keep those large terms and
-drop small ones, so it does much better than ridge, but not better than the
-simpler M4 or M5.
+Adding the Re $\times$ gravity interaction (M4) cuts the CV error for variance, skewness and kurtosis by more than half; the polynomial and log terms alone (M2, M3) barely help. Ridge (M8) does poorly because it shrinks **every** coefficient toward zero, including the large and real Re and gravity effects, which adds bias. Lasso (M7) can keep those large terms and drop small ones, so it does much better than ridge, but not better than the simpler M4 or M5.
 
 ## Check: two-level gravity vs three-level Fr
 
@@ -408,8 +359,7 @@ sapply(responses, function(y) c(
     paste(y, "~ poly(log_St, 3) + Re_f * Grav"))))) |> round(3)
 ```
 
-The two codings give almost the same CV error, so the simpler gravity
-variable loses nothing.
+The two codings give almost the same CV error, so the simpler gravity variable loses nothing.
 
 ## Bias-variance trade-off
 
@@ -432,11 +382,7 @@ ggplot(bv, aes(model, rmse, color = error, group = error)) +
   theme(legend.position = "bottom")
 ```
 
-Training error keeps falling as complexity grows. CV error falls sharply
-at M4 (adding Re $\times$ gravity removes a large **bias**) and then flattens
-or rises: the full-interaction model M6 fits each setting separately with
-only about 10 runs per setting, so its **variance** is high (for the mean
-its CV error is worse than M4's).
+Training error keeps falling as complexity grows. CV error falls sharply at M4 (adding Re $\times$ gravity removes a large **bias**) and then flattens or rises: the full-interaction model M6 fits each setting separately with only about 10 runs per setting, so its **variance** is high (for the mean its CV error is worse than M4's).
 
 ```{r}
 #| label: bias-variance-degree
@@ -472,14 +418,11 @@ deg_grid |>
   theme(legend.position = "bottom")
 ```
 
-The same pattern appears for the polynomial degree: training error keeps
-falling, while CV error stops improving after a degree of 2 to 4.
+The same pattern appears for the polynomial degree: training error keeps falling, while CV error stops improving after a degree of 2 to 4.
 
 ## Model selection: the one-standard-error rule
 
-For each target, find the model with the lowest CV RMSE, then choose the
-**simplest** model whose CV RMSE is within one standard error of it. This
-favours interpretability when the data cannot tell models apart.
+For each target, find the model with the lowest CV RMSE, then choose the **simplest** model whose CV RMSE is within one standard error of it. This favors interpretability when the data cannot tell models apart.
 
 ```{r}
 #| label: one-se
@@ -498,10 +441,7 @@ selected |>
   knitr::kable(caption = "Selected model per target (one-SE rule)")
 ```
 
-Then choose the polynomial degree for each selected model. The degree is
-an ordinary tuning parameter, so we take the degree with the **lowest** CV
-error. (The one-SE rule would pick degree 1 for skewness and kurtosis, a
-straight line in log St, which the EDA plots show is too simple.)
+Then choose the polynomial degree for each selected model. The degree is an ordinary tuning parameter, so we take the degree with the **lowest** CV error. (The one-SE rule would pick degree 1 for skewness and kurtosis, a straight line in log St, which the EDA plots show is too simple.)
 
 ```{r}
 #| label: degree-choice
@@ -548,10 +488,7 @@ p2 <- ggplot(diag_df, aes(sample = resid)) +
 p1; p2
 ```
 
-The residuals show no remaining pattern by fitted value. The few large
-residuals are runs at St = 0.05, the smallest inertia, where clustering is
-just beginning and the cluster summaries are noisy; they make the residual
-tails heavier than normal.
+The residuals show no remaining pattern by fitted value. The few large residuals are runs at St = 0.05, the smallest inertia, where clustering is just beginning and the cluster summaries are noisy; they make the residual tails heavier than normal.
 
 # Scientific inference
 
@@ -593,8 +530,7 @@ ggplot(curves, aes(St, fit, color = Fr_f, fill = Fr_f)) +
 
 ## Effect sizes
 
-Each effect compares two settings, holding the others fixed, as a
-**fold-change**: the ratio of predicted values (1 = no effect).
+Each effect compares two settings, holding the others fixed, as a **fold-change**: the ratio of predicted values (1 = no effect).
 
 ```{r}
 #| label: effect-sizes
@@ -631,37 +567,20 @@ knitr::kable(effects, caption = paste("Fold-change (95% CI); St = 0.5",
 
 **How does each parameter affect the cluster-volume distribution?**
 
-- **Re (turbulence intensity)** has the largest effect. Higher Re makes the
-  mean (normalized) cluster volume much smaller but makes the distribution
-  far more skewed and heavy-tailed: stronger turbulence produces many
-  smaller clusters plus rare very large ones. The effect is nonlinear in Re
-  (the first step changes the targets much more than the second).
-- **Fr (gravity)** matters only when gravity is strong (Fr = 0.052); weak
-  gravity behaves like no gravity. The strong-gravity effect depends on Re:
-  it is very large at Re = 90 (variance about 750 times larger), smaller at
-  Re = 224, and gone by Re = 398, because intense turbulence breaks up the
-  structures that settling creates.
-- **St (particle inertia)** has a clearly nonlinear effect. The mean and
-  variance increase with St, fastest at small St; skewness and kurtosis
-  stay roughly flat at small St and decline at large St (skewness falls by
-  about a quarter from St = 1 to 3).
+-   **Re (turbulence intensity)** has the largest effect. Higher Re makes the mean (normalized) cluster volume much smaller but makes the distribution far more skewed and heavy-tailed: stronger turbulence produces many smaller clusters plus rare very large ones. The effect is nonlinear in Re (the first step changes the targets much more than the second).
+-   **Fr (gravity)** matters only when gravity is strong (Fr = 0.052); weak gravity behaves like no gravity. The strong-gravity effect depends on Re: it is very large at Re = 90 (variance about 750 times larger), smaller at Re = 224, and gone by Re = 398, because intense turbulence breaks up the structures that settling creates.
+-   **St (particle inertia)** has a clearly nonlinear effect. The mean and variance increase with St, fastest at small St; skewness and kurtosis stay roughly flat at small St and decline at large St (skewness falls by about a quarter from St = 1 to 3).
 
 **Are the effects the same for all four summaries?** No.
 
-- Re moves the mean down but skewness and kurtosis up.
-- Gravity barely changes the mean but multiplies the variance and tail
-  measures: it changes how unequal cluster sizes are, not the typical size.
-- Only the mean needs a St $\times$ gravity interaction: under strong
-  gravity, the mean cluster volume stops growing at large St.
-- Kurtosis follows skewness closely (kurtosis $\approx$ skewness$^2$).
+-   Re moves the mean down but skewness and kurtosis up.
+-   Gravity barely changes the mean but multiplies the variance and tail measures: it changes how unequal cluster sizes are, not the typical size.
+-   Only the mean needs a St $\times$ gravity interaction: under strong gravity, the mean cluster volume stops growing at large St.
+-   Kurtosis follows skewness closely (kurtosis $\approx$ skewness$^2$).
 
 # Final predictions on the test set
 
-The final models are refit on all 89 training runs and used to predict the
-23 test settings. The case study asks for the four summary statistics, so
-the raw moments $E[X^k]$ are not needed for the test set. Predictions are
-back-transformed with `exp()`, so they estimate the median of each summary
-at that setting.
+The final models are refit on all 89 training runs and used to predict the 23 test settings. The case study asks for the four summary statistics, so the raw moments $E[X^k]$ are not needed for the test set. Predictions are back-transformed with `exp()`, so they estimate the median of each summary at that setting.
 
 ```{r}
 #| label: predict-test
@@ -695,11 +614,7 @@ all(is.finite(as.matrix(predictions[, 4:8]))) &&
 
 ## Uncertainty in the predictions
 
-The case study asks for uncertainty in the predictive results. The table
-below gives a 95% prediction interval for each summary (shown for the
-mean and variance; the same is done for all four). Four test settings use
-an St outside the range observed for their (Re, Fr) setting, so they are
-extrapolations.
+The case study asks for uncertainty in the predictive results. The table below gives a 95% prediction interval for each summary (shown for the mean and variance; the same is done for all four). Four test settings use an St outside the range observed for their (Re, Fr) setting, so they are extrapolations.
 
 ```{r}
 #| label: uncertainty
@@ -720,7 +635,4 @@ data.frame(
   knitr::kable(caption = "Predictions with 95% prediction intervals")
 ```
 
-The prediction intervals come from the linear models and assume the
-typical residual size applies everywhere. Cross-validation showed errors
-are larger at the edges of each setting's St range, so the intervals for
-the four extrapolated settings should be read as optimistic.
+The prediction intervals come from the linear models and assume the typical residual size applies everywhere. Cross-validation showed errors are larger at the edges of each setting's St range, so the intervals for the four extrapolated settings should be read as optimistic.
