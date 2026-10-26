@@ -67,3 +67,28 @@ I found that all four statistical measures do have a wide range of values. Like 
 For the input variables, I noticed that Re and Fr each have only three possible values. Thus I treated them as categorical variables. St has 14 different values in which most of them, bunched near 0, so I used log(St) to spread out these values and make it easier for me to understand how St affects the cluster volumes.
 
 ### What I saw in the data
+
+```{r}
+
+#| label: fig-eda
+#| fig-cap: "Log of each summary against log(St). Columns are Re levels and colors are Fr levels."
+#| fig-width: 7
+#| fig-height: 4
+ggplot(long, aes(log_St, log(value), color = Fr_f)) +
+  geom_point(size = 0.7) +
+  geom_line(linewidth = 0.4) +
+  facet_grid(target ~ Re_f, scales = "free_y",
+             labeller = labeller(Re_f = function(x) paste("Re =", x))) +
+  scale_color_manual(values = fr_cols, name = "Fr") +
+  labs(x = "log(St)", y = "log(summary)") +
+  theme_bw(base_size = 8) +
+  theme(legend.position = "bottom")
+```
+
+Here is @fig-eda which gave me some clear insights.
+
+The first thing that I noticed is that the relationship with St is not linear. From the graphs, even after I applied a log transformation to St, the relationship is not a straight line. Because of this, I tried to include polynomial terms in our models to better capture these nonlinear patterns.
+
+The second thing that I see is that Re and Fr interact. When gravity is strong like Fr = 0.052, I see that the variance, skewness, and kurtosis have all increased significantly at Re = 90. But I do see that this increase becomes smaller at Re = 224 and is barely noticeable at Re = 398. What this could mean is that the effect of gravity does depends on the value of Re. So I included an interaction term between Re and Fr in our models to account for this relationship.
+
+The third thing I noticed is that weak gravity has a similar effect to no gravity. I see that the lines for Fr = 0.3 and Fr = $\infty$ are almost identical. So I replaced Fr with a simpler gravity variable that has two categories. In this case, strong gravity (Fr = 0.052), and weak or no gravity (Fr = 0.3 or $\infty$). I find that this simpler approach predicts just as well as using all three Fr values while making the models easier to understand and interpret.
