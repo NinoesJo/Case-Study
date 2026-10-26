@@ -15,13 +15,12 @@ execute:
 
 In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. So understanding how these particles come together to form clusters is very important as it can help explain things like how rain forms. The data set that I worked on contains 89 simulation runs in which each run involves three input variables. These variables include the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each simulation, I analyzed the distribution of cluster volumes by looking at four statistical measures, which includes mean, variance, skewness, and kurtosis. From my understanding, the mean tell us the average cluster volume, the variance measures how much the cluster volumes differ from the average, skewness describes whether the distribution is more spread out toward smaller or larger clusters, and kurtosis helps us understand how likely the distribution is to contain unusually small or large clusters.
 
-With this case study, I got two goals in mind. My first goal is that I want to predict these four statistical measures for new set of combinations of Re, Fr, and St. My second goal is that I want to understand how each input variable affects the cluster volume distribution and whether these effects differ across the four statistical measures. To do this, I use linear regression models on the log scale, which allows for a nonlinear relationship with St and an interaction between Re and Fr. I then select my models using cross-validation to evaluate how well these models predict new data. With this approach, it allows me to understand the influence of each variable while also keeping the models relatively simple and accurate.
+With this case study, I got two goals in mind. My first goal is that I want to predict these four statistical measures for new set of combinations of Re, Fr, and St. My second goal is that I want to understand how each input variable affects the cluster volume distribution and whether these effects differ across the four statistical measures. To do this, I use linear regression models on the log scale, which allows for a nonlinear relationship with St and an interaction between Re and gravity. I then select my models using cross-validation to evaluate how well these models predict new data. With this approach, it allows me to understand the influence of each variable while also keeping the models relatively simple and accurate.
 
 ## Methodology
 
 ```{r}
 
-#| label: setup
 library(ggplot2)
 library(dplyr)
 library(tidyr)
@@ -70,8 +69,6 @@ For the input variables, I noticed that Re and Fr each have only three possible 
 
 ```{r}
 
-#| label: fig-eda
-#| fig-cap: "Log of each summary against log(St). Columns are Re levels and colors are Fr levels."
 #| fig-width: 7
 #| fig-height: 4
 ggplot(long, aes(log_St, log(value), color = Fr_f)) +
@@ -85,10 +82,34 @@ ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   theme(legend.position = "bottom")
 ```
 
-Here is @fig-eda which gave me some clear insights.
+This figure has gave me some clear insights.
 
 The first thing that I noticed is that the relationship with St is not linear. From the graphs, even after I applied a log transformation to St, the relationship is not a straight line. Because of this, I tried to include polynomial terms in our models to better capture these nonlinear patterns.
 
 The second thing that I see is that Re and Fr interact. When gravity is strong like Fr = 0.052, I see that the variance, skewness, and kurtosis have all increased significantly at Re = 90. But I do see that this increase becomes smaller at Re = 224 and is barely noticeable at Re = 398. What this could mean is that the effect of gravity does depends on the value of Re. So I included an interaction term between Re and Fr in our models to account for this relationship.
 
 The third thing I noticed is that weak gravity has a similar effect to no gravity. I see that the lines for Fr = 0.3 and Fr = $\infty$ are almost identical. So I replaced Fr with a simpler gravity variable that has two categories. In this case, strong gravity (Fr = 0.052), and weak or no gravity (Fr = 0.3 or $\infty$). I find that this simpler approach predicts just as well as using all three Fr values while making the models easier to understand and interpret.
+
+### Models I tried
+
+**Model 1**: the simplest model, linear in St, plus Re and gravity.
+
+**Model 2**: the same as model 1 but I used log(St).
+
+**Model 3**: used a cubic polynomial in log(St), plus Re and gravity.
+
+**Model 4**: the same as model 3 plus an Re $\times$ gravity interaction.
+
+**Model 5**: the same as model 4 plus an St $\times$ gravity interaction.
+
+**Model 6**: the most flexible model, fits a separate St curve for each of the 6 Re-and-gravity combinations.
+
+**Model 7 & 8**: lasso and ridge versions of model 6, which shrink its coefficients to keep it from overfitting.
+
+Model 1 to model 6, I used ordinary least squares regression to fit these models. For the lasso and ridge regression models, I used cross-validation to select the best value of the shrinkage parameter ($\lambda$). I fit every model separately for each of the four statistical measures.
+
+### Picking the best model
+
+I used 10-fold cross-validation so that I can compare how well each model predicts new data. I first divided the 89 simulation runs into 10 groups. I then trained each model using 9 groups and tested its predictions on the remaining group. I repeated this process 10 times so that every group was used for testing once. I used the root mean squared error (RMSE) on the log scale so that I can measure prediction accuracy. In this case, an RMSE of 0.1 means that our predictions are usually off by about 10%.
+
+Since I also wanted my models to be easy to understand and interpret, I did not automatically choose the model with the lowest cross-validation error. Instead, for each of the four statistical measures, I selected the simplest model that performed nearly as well as the best model. I also tested polynomial degrees from 1 to 6 to determine how much curvature was needed to capture how St affects the statistical measures. I then selected the degree that produced the lowest cross-validation error.
