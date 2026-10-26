@@ -5,10 +5,65 @@ date: "October 27, 2026"
 format: pdf
 output: pdf_document
 font-size: 8px
+execute:
+    echo: false
+    warning: false
+    message: false
 ---
 
 ## Introduction
 
 In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. So understanding how these particles come together to form clusters is very important as it can help explain things like how rain forms. The data set that I worked on contains 89 simulation runs in which each run involves three input variables. These variables include the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each simulation, I analyzed the distribution of cluster volumes by looking at four statistical measures, which includes mean, variance, skewness, and kurtosis. From my understanding, the mean tell us the average cluster volume, the variance measures how much the cluster volumes differ from the average, skewness describes whether the distribution is more spread out toward smaller or larger clusters, and kurtosis helps us understand how likely the distribution is to contain unusually small or large clusters.
 
-With this case study, I got two goals in mind. My first goal is that I want to predict these four statistical measures for new set of combinations of Re, Fr, and St. My second goal is that I want to understand how each input variable affects the cluster volume distribution and whether these effects differ across the four statistical measures. To do this, I use linear regression models on the log scale, which allows for a nonlinear relationship with St and an interaction between Re and gravity. I then select my models using cross-validation to evaluate how well these models predict new data. With this approach, it allows me to understand the influence of each variable while also keeping the models relatively simple and accurate.
+With this case study, I got two goals in mind. My first goal is that I want to predict these four statistical measures for new set of combinations of Re, Fr, and St. My second goal is that I want to understand how each input variable affects the cluster volume distribution and whether these effects differ across the four statistical measures. To do this, I use linear regression models on the log scale, which allows for a nonlinear relationship with St and an interaction between Re and Fr. I then select my models using cross-validation to evaluate how well these models predict new data. With this approach, it allows me to understand the influence of each variable while also keeping the models relatively simple and accurate.
+
+## Methodology
+
+```{r}
+
+#| label: setup
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+train <- read.csv("data/data-train.csv")
+test  <- read.csv("data/data-test.csv")
+
+m1 <- train$R_moment_1; m2 <- train$R_moment_2
+m3 <- train$R_moment_3; m4 <- train$R_moment_4
+train$mean     <- m1
+train$variance <- m2 - m1^2
+train$skewness <- (m3 - 3*m1*m2 + 2*m1^3) / train$variance^1.5
+train$kurtosis <- (m4 - 4*m1*m3 + 6*m1^2*m2 - 3*m1^4) / train$variance^2
+
+prep <- function(d) {
+  d$Re_f   <- factor(d$Re, levels = c(90, 224, 398))
+  d$Fr_f   <- factor(d$Fr, levels = c(0.052, 0.3, Inf),
+                     labels = c("0.052", "0.3", "Inf"))
+  d$log_St <- log(d$St)
+  d$Grav   <- factor(ifelse(d$Fr == 0.052, "strong", "weak/none"),
+                     levels = c("weak/none", "strong"))
+  d
+}
+train <- prep(train)
+test  <- prep(test)
+
+long <- train |>
+  select(St, log_St, Re_f, Fr_f, mean, variance, skewness, kurtosis) |>
+  pivot_longer(mean:kurtosis, names_to = "target", values_to = "value") |>
+  mutate(target = factor(target,
+                         levels = c("mean", "variance", "skewness", "kurtosis"),
+                         labels = c("Mean", "Variance", "Skewness", "Kurtosis")))
+
+fr_cols <- c("0.052" = "#D55E00", "0.3" = "#0072B2", "Inf" = "#009E73")
+```
+
+### Preparing the data
+
+The simulations that were first provided to me has the first four raw moments of the cluster volumes, in which I use to calculate the mean, variance, skewness, and kurtosis using standard statistical formulas such as $E[X^2] - (E[X]^2)$ to calculate the variance as an example.
+
+I found that all four statistical measures do have a wide range of values. Like for the variance, it ranges from about $10^{-4}$ to $10^3$, which means that some values are much larger than others. The variation also varies significantly between different simulation settings. So to account for these differences, I applied a log transformation to each measure before building my models. With this, it makes the data easier to analyze and it helps my models be better at understanding how each input variable influences the results.
+
+For the input variables, I noticed that Re and Fr each have only three possible values. Thus I treated them as categorical variables. St has 14 different values in which most of them, bunched near 0, so I used log(St) to spread out these values and make it easier for me to understand how St affects the cluster volumes.
+
+### What I saw in the data
