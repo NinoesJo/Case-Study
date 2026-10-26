@@ -113,3 +113,23 @@ Model 1 to model 6, I used ordinary least squares regression to fit these models
 I used 10-fold cross-validation so that I can compare how well each model predicts new data. I first divided the 89 simulation runs into 10 groups. I then trained each model using 9 groups and tested its predictions on the remaining group. I repeated this process 10 times so that every group was used for testing once. I used the root mean squared error (RMSE) on the log scale so that I can measure prediction accuracy. In this case, an RMSE of 0.1 means that our predictions are usually off by about 10%.
 
 Since I also wanted my models to be easy to understand and interpret, I did not automatically choose the model with the lowest cross-validation error. Instead, for each of the four statistical measures, I selected the simplest model that performed nearly as well as the best model. I also tested polynomial degrees from 1 to 6 to determine how much curvature was needed to capture how St affects the statistical measures. I then selected the degree that produced the lowest cross-validation error.
+
+### Final Model
+
+My final model that I ended up selecting are model 4 and model 5. The equation I show you here is model 4. Let $x = \log(St)$. Let $R_{224} = 1$ if $Re = 224$ and $R_{398} = 1$ if $Re = 398$ (both would be 0 if Re = 90). And let $G = 1$ for strong gravity while $G = 0$ is for weak or no gravity.
+
+$$
+\begin{aligned}
+\log(\text{summary}) = \; & \underbrace{b_0 + b_1 x + b_2 x^2 + \dots + b_d x^d}_{\text{curved effect of St}}
++ \underbrace{b_{224} R_{224} + b_{398} R_{398}}_{\text{effect of Re}} \\
+& + \underbrace{b_G \, G}_{\text{effect of gravity}}
++ \underbrace{b_{224,G} \, R_{224} G + b_{398,G} \, R_{398} G}_{\text{Re} \times \text{gravity}}
++ \varepsilon
+\end{aligned}
+$$
+
+Here, $b_0 + b_1 x + \dots + b_d x^d$ is the curve that shows how the summary changes with St. With $b_{224}$ and $b_{398}$, it shifts the whole curve up or down when Re is 224 or 398 instead of 90. $b_G$ represents how much strong gravity shifts the curve at $Re = 90$. While $b_{224,G}$ and $b_{398,G}$ adjust the gravity effect at $Re = 224$ and $Re = 398$. This is basically the Re $\times$ gravity interaction where gravity matters more at some Re levels than others.
+
+For the mean, the best model is actually model 5, which is the same equation as above plus an St $\times$ gravity interaction.
+
+With $d$, it shows how curvy the St curve can be and I picked it by trying $d = 1$ to $d = 6$ and kept the one with the lowest CV error. The mean uses model 5 with $d = 4$, the variance uses model 4 with $d = 4$, and I used model 4 for skewness and kurtosis with $d = 2$.
