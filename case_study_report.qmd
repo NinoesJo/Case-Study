@@ -133,3 +133,101 @@ Here, $b_0 + b_1 x + \dots + b_d x^d$ is the curve that shows how the summary ch
 For the mean, the best model is actually model 5, which is the same equation as above plus an St $\times$ gravity interaction.
 
 With $d$, it shows how curvy the St curve can be and I picked it by trying $d = 1$ to $d = 6$ and kept the one with the lowest CV error. The mean uses model 5 with $d = 4$, the variance uses model 4 with $d = 4$, and I used model 4 for skewness and kurtosis with $d = 2$.
+
+## Results
+
+### Which model predicts the best?
+
+```{r}
+
+library(glmnet)
+
+train <- train |>
+  mutate(log_mean = log(mean), log_variance = log(variance),
+         log_skewness = log(skewness), log_kurtosis = log(kurtosis))
+responses <- c(Mean = "log_mean", Variance = "log_variance",
+               Skewness = "log_skewness", Kurtosis = "log_kurtosis")
+
+rhs <- c(M1 = "St + Re_f + Grav",
+         M2 = "log_St + Re_f + Grav",
+         M3 = "poly(log_St, 3) + Re_f + Grav",
+         M4 = "poly(log_St, 3) + Re_f * Grav",
+         M5 = "poly(log_St, 3) * Grav + Re_f * Grav",
+         M6 = "poly(log_St, 3) * Re_f * Grav")
+x_matrix <- function(d)
+  model.matrix(~ poly(log_St, 3, raw = TRUE) * Re_f * Grav, data = d)[, -1]
+
+set.seed(325)
+folds <- sample(rep(1:10, length.out = nrow(train)))
+cv_rmse <- function(y, m) {
+  pred <- numeric(nrow(train))
+  for (k in 1:10) {
+    tr <- train[folds != k, ]; te <- train[folds == k, ]
+    if (m %in% names(rhs)) {
+      fit <- lm(as.formula(paste(y, "~", rhs[[m]])), data = tr)
+      pred[folds == k] <- predict(fit, newdata = te)
+    } else {
+      set.seed(k)
+      fit <- cv.glmnet(x_matrix(tr), tr[[y]], alpha = ifelse(m == "M7", 1, 0))
+      pred[folds == k] <- predict(fit, x_matrix(te), s = "lambda.min")
+    }
+  }
+  sqrt(mean((train[[y]] - pred)^2))
+}
+models <- c(names(rhs), "M7", "M8")
+cv_table <- sapply(responses, function(y) sapply(models, function(m) cv_rmse(y, m)))
+
+final_formulas <- list(
+  Mean     = log_mean     ~ poly(log_St, 4) * Grav + Re_f * Grav,  # M5, d = 4
+  Variance = log_variance ~ poly(log_St, 4) + Re_f * Grav,         # M4, d = 4
+  Skewness = log_skewness ~ poly(log_St, 2) + Re_f * Grav,         # M4, d = 2
+  Kurtosis = log_kurtosis ~ poly(log_St, 2) + Re_f * Grav          # M4, d = 2
+)
+final_fits <- lapply(final_formulas, lm, data = train)
+
+final_cv <- sapply(names(final_formulas), function(t) {
+  pred <- numeric(nrow(train))
+  for (k in 1:10) {
+    fit <- lm(final_formulas[[t]], data = train[folds != k, ])
+    pred[folds == k] <- predict(fit, newdata = train[folds == k, ])
+  }
+  sqrt(mean((train[[responses[[t]]]] - pred)^2))
+})
+```
+
+```{r}
+
+model_labels <- c(M1 = "M1: linear", M2 = "M2: log(St)",
+                  M3 = "M3: cubic in log(St)", M4 = "M4: + Re x gravity",
+                  M5 = "M5: + St x gravity", M6 = "M6: separate curves",
+                  M7 = "M7: lasso", M8 = "M8: ridge")
+tab <- as.data.frame(round(cv_table, 3))
+tab <- rbind(tab, "Final model" = round(final_cv, 3))
+rownames(tab) <- c(model_labels[models], "Final model")
+knitr::kable(tab)
+```
+
+```{r}
+
+deg_rhs <- c(Mean     = "poly(log_St, %d) * Grav + Re_f * Grav",  # M5
+             Variance = "poly(log_St, %d) + Re_f * Grav",         # M4
+             Skewness = "poly(log_St, %d) + Re_f * Grav",         # M4
+             Kurtosis = "poly(log_St, %d) + Re_f * Grav")         # M4
+deg_table <- sapply(names(deg_rhs), function(t) sapply(1:6, function(d) {
+  f <- as.formula(paste(responses[[t]], "~", sprintf(deg_rhs[[t]], d)))
+  pred <- numeric(nrow(train))
+  for (k in 1:10) {
+    fit <- lm(f, data = train[folds != k, ])
+    pred[folds == k] <- predict(fit, newdata = train[folds == k, ])
+  }
+  sqrt(mean((train[[responses[[t]]]] - pred)^2))
+}))
+deg_table <- data.frame(d = 1:6, round(deg_table, 3))
+knitr::kable(deg_table, row.names = FALSE)
+```
+
+The first table shows the cross-validation error for each model. I see that using $\log(St)$ and adding a curved relationship with St in model 2 and model 3 slightly improves he prediction accuracy. But I do recognized a big improvement coming from model 4, which includes the interaction between Re and gravity. This does reduce the CV error by more than half for variance (1.69 to 0.79), skewness (0.62 to 0.23), and kurtosis (1.20 to 0.41). For the mean, I see that model 5 performs even better by allowing the effect of St to change depending on gravity, which reduced the CV error from 0.101 to 0.074.
+
+With these results, I need to consider the bias-variance tradeoff. With models 1 through 3, the models are too simple to capture important patterns in the data, which would lead to high bias. On the other hand, model 6 is too complex and would begin fitting random noise rather than the actual patterns in the data, which would result in high variance, and this could explain why the CV error for the mean increased.
+
+In the first table, it show models 1 through 6 using a third-degree polynomial of $\log(St)$. So after selecting model 5 for the mean and model 4 for the other variables, I tested the polynomial degrees from 1 to 6 to find which degree gives the most accurate predictions as seen in the second table. The results in the second table showcase that degree 4 performs the best for the mean and variance while degree 2 performs the best for skewness and kurtosis. These choices were used to give me the final model as can be seen in the final row of the first table.
