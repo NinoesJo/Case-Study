@@ -231,3 +231,61 @@ The first table shows the cross-validation error for each model. I see that usin
 With these results, I need to consider the bias-variance tradeoff. With models 1 through 3, the models are too simple to capture important patterns in the data, which would lead to high bias. On the other hand, model 6 is too complex and would begin fitting random noise rather than the actual patterns in the data, which would result in high variance, and this could explain why the CV error for the mean increased.
 
 In the first table, it show models 1 through 6 using a third-degree polynomial of $\log(St)$. So after selecting model 5 for the mean and model 4 for the other variables, I tested the polynomial degrees from 1 to 6 to find which degree gives the most accurate predictions as seen in the second table. The results in the second table showcase that degree 4 performs the best for the mean and variance while degree 2 performs the best for skewness and kurtosis. These choices were used to give me the final model as can be seen in the final row of the first table.
+
+As for uncertainty, the last row of the first table gives the CV error of my final models. Since I model on the log scale, it means that our predictions are typically off by a factor of $e^{\text{CV error}}$. With our final model, the mean has a CV error of 0.074 and $e^{0.074} \approx 1.08$, meaning that my predictions are typically off by about 8%. With this in mind, the prediction errors are approximately 25% for skewness, 50% for kurtosis, and a factor of 2 for variance. But I do note that my predictions are less reliable for test points where St falls outside the range of values used to build the models for their corresponding Re and Fr settings.
+
+## How Re, gravity, and St affects the cluster
+
+```{r}
+
+#| fig-width: 7
+#| fig-height: 4.6
+settings <- unique(train[, c("Re", "Fr", "Re_f", "Fr_f", "Grav")])
+st_range <- train |> group_by(Re, Fr) |>
+  summarise(st_min = min(St), st_max = max(St), .groups = "drop")
+grid <- merge(settings, data.frame(St = exp(seq(log(0.05), log(3), length.out = 60)))) |>
+  left_join(st_range, by = c("Re", "Fr")) |>
+  filter(St >= st_min, St <= st_max)        # only where we have data
+grid$log_St <- log(grid$St)
+
+curves <- bind_rows(lapply(names(final_fits), function(t) {
+  cbind(grid, target = t, fit = exp(predict(final_fits[[t]], newdata = grid)))
+}))
+curves$target <- factor(curves$target, levels = names(responses))
+
+ggplot(curves, aes(St, fit, color = Fr_f)) +
+  geom_line(linewidth = 0.5) +
+  geom_point(data = long, aes(St, value, color = Fr_f), inherit.aes = FALSE,
+             size = 0.6) +
+  facet_grid(target ~ Re_f, scales = "free_y",
+             labeller = labeller(Re_f = function(x) paste("Re =", x))) +
+  scale_x_log10(breaks = c(0.05, 0.1, 0.3, 1, 3)) +
+  scale_y_log10() +
+  scale_color_manual(values = fr_cols, name = "Fr") +
+  labs(x = "St (log scale)", y = "Summary (log scale)") +
+  theme_bw(base_size = 8) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+
+setting <- function(St, Re, Fr) prep(data.frame(St = St, Re = Re, Fr = Fr))
+fold_change <- function(fit, a, b) {
+  ratio <- unname(exp(predict(fit, newdata = a) - predict(fit, newdata = b)))
+  format(signif(ratio, 3), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+comparisons <- list(
+  "Re 90 to 224"                   = list(setting(0.5, 224, Inf),   setting(0.5, 90, Inf)),
+  "Re 224 to 398"                  = list(setting(0.5, 398, Inf),   setting(0.5, 224, Inf)),
+  "Strong vs. no gravity, Re 90"   = list(setting(0.5, 90, 0.052),  setting(0.5, 90, Inf)),
+  "Strong vs. no gravity, Re 224"  = list(setting(0.5, 224, 0.052), setting(0.5, 224, Inf)),
+  "Strong vs. no gravity, Re 398"  = list(setting(0.5, 398, 0.052), setting(0.5, 398, Inf))
+)
+effects <- sapply(final_fits, function(fit)
+  sapply(comparisons, function(cc) fold_change(fit, cc[[1]], cc[[2]])))
+knitr::kable(effects)
+```
+
+The plots here shows my models' predictions across St, while the table showcases how much each statistical measures changes when I change one input at a time.
+
+My first big takeaway is that Re has the biggest effect. When Re increases from 90 to 224, I see that the average becomes about 33 times smaller while the skewness increases by about 5.6 times, which suggests that stronger turbulence do lead to more smaller clusters, but there are still a few very large clusters that make the distribution less balanced. Another thing I noticed is that gravity does have a greater effect whenever the turbulence is weaker. As shown from the table, when $Re = 90$, strong gravity increases the variance by about 765 times. But when $Re = 224$, the increase is only about 7 times, and I see that gravity has almost no effect when $Re = 398$. What this could tell us is that gravity causes particles to settle and form larger clusters while stronger turbulence breaks these clusters apart. The last thing I want to point out is that the four statistical measures respond differently to the input variable. In the plot, I see that increasing Re does decrease the mean cluster volume, but it also increase skewness and kurtosis. With the graph, I can also tell that gravity has little effect in the mean but significantly affects volume, skewness, and kurtosis. What this tells me is that gravity mainly changes how much the cluster sizes differ.
