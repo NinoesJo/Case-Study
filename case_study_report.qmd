@@ -12,9 +12,7 @@ execute:
 
 ## Introduction
 
-In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. Understanding how they form clusters can help explain things like how rain forms. The data set has 89 simulation runs with three input variables, that includes the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each run, I looked at four summary statistics, that includes the mean which is the average cluster volume, the variance which measures how much the cluster volumes differ from the average, the skewness which describes whether the distribution is more spread out toward smaller or larger clusters, and the kurtosis which tells us how likely the distribution is to contain unusually larger clusters.
-
-I had two objectives for this case study. The first goal is to predict these four summary statistics for new combinations of Re, Fr, and St. My second goal is to understand how each input affects the four summary statistics and whether these effects differ from one measure to another. To do this, I used log-scale liner regression models that are chosen by cross-validation.
+In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. Understanding how they form clusters can help explain things like how rain forms. The data set has 89 simulation runs with three input variables, that includes the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each run, I looked at four summary statistics, that includes the mean which is the average cluster volume, the variance which measures how much the cluster volumes differ from the average, the skewness which describes whether the distribution is more spread out toward smaller or larger clusters, and the kurtosis which tells us how likely the distribution is to contain unusually larger clusters. I had two objectives for this case study. The first goal is to predict these four summary statistics for new combinations of Re, Fr, and St. My second goal is to understand how each input affects the four summary statistics and whether these effects differ from one measure to another. To do this, I used log-scale liner regression models that are chosen by cross-validation.
 
 ## Methodology
 
@@ -63,9 +61,8 @@ The data contains the first four raw moments of the cluster volumes in which I u
 ### What I saw in the data
 
 ```{r}
-
 #| fig-width: 7
-#| fig-height: 4
+#| fig-height: 3.3
 ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   geom_point(size = 0.7) +
   geom_line(linewidth = 0.4) +
@@ -185,9 +182,8 @@ For uncertainty, the predictions are typically off by a factor of $e^{\text{CV e
 ## How Re, gravity, and St affects the clusters
 
 ```{r}
-
 #| fig-width: 7
-#| fig-height: 4.6
+#| fig-height: 3.3
 settings <- unique(train[, c("Re", "Fr", "Re_f", "Fr_f", "Grav")])
 st_range <- train |> group_by(Re, Fr) |>
   summarise(st_min = min(St), st_max = max(St), .groups = "drop")
@@ -238,9 +234,11 @@ As the table shows, it suggests that Re has the biggest effect. Increasing the R
 
 ## Conclusion
 
-In this case study, I used simple linear regression models on the log scale in order to predict the mean, variance, skewness, and kurtosis of particle cluster volumes based on Re, Fr, and St. I compared several models using cross-validation to see which ones made the most accurate predictions. With that, I found that model 4 performs the best for variance, skewness, and kurtosis, which includes a curved relationship with St and an interaction between Re and gravity. For the mean, I found that model 5 performs better since the model accounts for how the relationship between St and the mean cluster volume changes with the strength of gravity. I do find that these models provides accurate predictions while staying it simple enough to understand how each input variable affects the cluster volumes. However, one limitation is that some test points do have St values that are outside the range I used to train the models, which makes the predictions for those points less reliable.
+So using cross-validation, model 4 was the best for the variance, skewness, and kurtosis, while model 5 was the best for the mean since it accounts for how the relationship between St and the mean cluster volume changes with the strength of gravity. With these models, it provides accurate predictions while keeping it simple enough to understand how each input variable affects the cluster volumes. However, one limitation is that some test points have St values outside the training range I used to train the models, so those predictions are less reliable. My main finding is that Re has the strongest effect on cluster volumes, which shrinks the average cluster volume but it raises the skewness and kurtosis. Another finding is that gravity only matters when it is strong, and its effect fades as turbulence grows. Also that gravity changes the average cluster size only slightly and mainly changes how much cluster sizes vary. And finally, St has a nonlinear effect on all four summary statistic.
 
-My main finding is that Re has the strongest effect on cluster volumes. As turbulence increases, the average cluster volume is expected to become much smaller, but there are still a few very large clusters that makes the distribution less balanced due to the fact that the skewness and kurtosis increased. Another finding is that gravity has a noticeable effect when it is strong as its influence decreases as turbulence increases. Also, the relationship between St and all four statistical measures is nonlinear, meaning that the effects of St do not follow a linear pattern basically. And the four statistical measures respond differently to the input variables, with gravity having a greater effect on how much cluster sizes varies instead of significantly affecting their average cluster volume.
+## Appendix
+
+The table below showcases CV error (in log scale) for polynomial degrees $d = 1$ to $6$, which uses model 5 for the mean and model 4 for the other summary statistics.
 
 ```{r}
 
