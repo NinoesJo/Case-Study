@@ -12,9 +12,9 @@ execute:
 
 ## Introduction
 
-In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. Understanding how they form clusters can help explain things like how rain forms. The data set has 89 simulation runs with three input variables, that includes the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each run, I looked at four statistical measures, that includes the mean which is the average cluster volume, the variance which measures how much the cluster volumes differ from the average, the skewness which describes whether the distribution is more spread out toward smaller or larger clusters, and the kurtosis which tells us how likely the distribution is to contain unusually larger clusters.
+In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. Understanding how they form clusters can help explain things like how rain forms. The data set has 89 simulation runs with three input variables, that includes the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each run, I looked at four summary statistics, that includes the mean which is the average cluster volume, the variance which measures how much the cluster volumes differ from the average, the skewness which describes whether the distribution is more spread out toward smaller or larger clusters, and the kurtosis which tells us how likely the distribution is to contain unusually larger clusters.
 
-I had two objectives for this case study. The first goal is to predict these four statistical measures for new combinations of Re, Fr, and St. My second goal is to understand how each input affects the four statistical measures and whether these effects differ from one measure to another. To do this, I used log-scale liner regression models that are chosen by cross-validation.
+I had two objectives for this case study. The first goal is to predict these four summary statistics for new combinations of Re, Fr, and St. My second goal is to understand how each input affects the four summary statistics and whether these effects differ from one measure to another. To do this, I used log-scale liner regression models that are chosen by cross-validation.
 
 ## Methodology
 
@@ -58,11 +58,7 @@ fr_cols <- c("0.052" = "#D55E00", "0.3" = "#0072B2", "Inf" = "#009E73")
 
 ### Preparing the data
 
-The simulations that were first provided to me has the first four raw moments of the cluster volumes, in which I use to calculate the mean, variance, skewness, and kurtosis using standard statistical formulas such as $E[X^2] - (E[X]^2)$ to calculate the variance as an example.
-
-I found that all four statistical measures do have a wide range of values. Like for the variance, it ranges from about $10^{-4}$ to $10^3$, which means that some values are much larger than others. The variation also varies significantly between different simulation settings. So to account for these differences, I applied a log transformation to each measure before building my models. With this, it makes the data easier to analyze and it helps my models be better at understanding how each input variable influences the results.
-
-For the input variables, I noticed that Re and Fr each have only three possible values. Thus I treated them as categorical variables. St has 14 different values in which most of them, bunched near 0, so I used log(St) to spread out these values and make it easier for me to understand how St affects the cluster volumes.
+The data contains the first four raw moments of the cluster volumes in which I used to calculate the mean, variance, skewness, and kurtosis. All four summary statistics have a huge range, such as the variance ranges from about $10^{-4}$ to $10^{3}$. Therefore, I took the log of each statistical measure before building my models. With the data, Re and Fr only have three values each, so I treated these variables as categorical. On the other hand, St has 14 values that are mostly bunched near 0, so I used $\log(St)$ to spread out these values.
 
 ### What I saw in the data
 
@@ -81,41 +77,19 @@ ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   theme(legend.position = "bottom")
 ```
 
-This figure has gave me some clear insights.
-
-The first thing that I noticed is that the relationship with St is not linear. From the graphs, even after I applied a log transformation to St, the relationship is not a straight line. Because of this, I tried to include polynomial terms in our models to better capture these nonlinear patterns.
-
-The second thing that I see is that Re and Fr interact. When gravity is strong like Fr = 0.052, I see that the variance, skewness, and kurtosis have all increased significantly at Re = 90. But I do see that this increase becomes smaller at Re = 224 and is barely noticeable at Re = 398. What this could mean is that the effect of gravity does depends on the value of Re. So I included an interaction term between Re and Fr in our models to account for this relationship.
-
-The third thing I noticed is that weak gravity has a similar effect to no gravity. I see that the lines for Fr = 0.3 and Fr = $\infty$ are almost identical. So I replaced Fr with a simpler gravity variable that has two categories. In this case, strong gravity (Fr = 0.052), and weak or no gravity (Fr = 0.3 or $\infty$). I find that this simpler approach predicts just as well as using all three Fr values while making the models easier to understand and interpret.
+This figure showed me three important things about the data. The first observation is that the relationship with St is not linear even after taking $\log(St)$, so I added polynomial terms in my models to better capture these nonlinear patterns. The second observation is that Re and Fr interact. It is seen that strong gravity ($Fr = 0.052$) greatly increases the variance, skewness, and kurtosis at $Re = 90$, but it increases less at $Re = 224$ and it barely increases at $Re = 398$. Thus I added an Re $\times$ gravity interaction in my models to account for this relationship. The third observation is that the lines for $Fr = 0.3$ and $Fr = \infty$ are almost identical, so I replaced Fr with a simpler gravity variable that has two categories, which are strong gravity ($Fr = 0.052$) and weak or no gravity ($Fr = 0.3$ or $\infty$). This approach predicts just as well and is easier to interpret.
 
 ### Models I tried
 
-**Model 1**: the simplest model, linear in St, plus Re and gravity.
-
-**Model 2**: the same as model 1 but I used log(St).
-
-**Model 3**: used a cubic polynomial in log(St), plus Re and gravity.
-
-**Model 4**: the same as model 3 plus an Re $\times$ gravity interaction.
-
-**Model 5**: the same as model 4 plus an St $\times$ gravity interaction.
-
-**Model 6**: the most flexible model, fits a separate St curve for each of the 6 Re-and-gravity combinations.
-
-**Model 7 & 8**: lasso and ridge versions of model 6, which shrink its coefficients to keep it from overfitting.
-
-Model 1 to model 6, I used ordinary least squares regression to fit these models. For the lasso and ridge regression models, I used cross-validation to select the best value of the shrinkage parameter ($\lambda$). I fit every model separately for each of the four statistical measures.
+I started with a simple linear model and then I kept increasing its complexity. Model 1 is linear in St, Re, and gravity, and model 2 is similar but uses $\log(St)$ instead. Model 3 uses a cubic polynomial in $\log(St)$. Model 4 adds an Re $\times$ gravity interaction on top of model 3, and model 5 is similar to model 4 but it also adds an St $\times$ gravity interaction. Model 6 is the most flexible as it fits a separate St curve for each of the 6 Re-gravity combinations, while model 7 and 8 are lasso and ridge versions of model 6 that shrink its coefficients to prevent overfitting. I chose the lasso and ridge penalty with cross-validation and then fit each model separately for each summary statistic.
 
 ### Picking the best model
 
-I used 10-fold cross-validation so that I can compare how well each model predicts new data. I first divided the 89 simulation runs into 10 groups. I then trained each model using 9 groups and tested its predictions on the remaining group. I repeated this process 10 times so that every group was used for testing once. I used the root mean squared error (RMSE) on the log scale so that I can measure prediction accuracy. In this case, an RMSE of 0.1 means that our predictions are usually off by about 10%.
-
-Since I also wanted my models to be easy to understand and interpret, I did not automatically choose the model with the lowest cross-validation error. Instead, for each of the four statistical measures, I selected the simplest model that performed nearly as well as the best model. I also tested polynomial degrees from 1 to 6 to determine how much curvature was needed to capture how St affects the statistical measures. I then selected the degree that produced the lowest cross-validation error.
+I compared all the models with 10-fold cross-validation. I measured RMSE on the log scale, meaning that an RMSE of 0.1 meant that the predictions are usually off by roughly 10%. Since I wanted my models to be interpretable, I picked the simplest model that did nearly as well as the best one.
 
 ### Final Model
 
-My final model that I ended up selecting are model 4 and model 5. The equation I show you here is model 4. Let $x = \log(St)$. Let $R_{224} = 1$ if $Re = 224$ and $R_{398} = 1$ if $Re = 398$ (both would be 0 if Re = 90). And let $G = 1$ for strong gravity while $G = 0$ is for weak or no gravity.
+The final models that selected were model 4 and model 5. The equation below is model 4. Let $x = \log(St)$. Let $R_{224} = 1$ if $Re = 224$ and $R_{398} = 1$ if $Re = 398$ (both would be 0 if Re = 90). And let $G = 1$ for strong gravity while $G = 0$ is for weak or no gravity.
 
 $$
 \begin{aligned}
@@ -127,11 +101,7 @@ $$
 \end{aligned}
 $$
 
-Here, $b_0 + b_1 x + \dots + b_d x^d$ is the curve that shows how the summary changes with St. With $b_{224}$ and $b_{398}$, it shifts the whole curve up or down when Re is 224 or 398 instead of 90. $b_G$ represents how much strong gravity shifts the curve at $Re = 90$. While $b_{224,G}$ and $b_{398,G}$ adjust the gravity effect at $Re = 224$ and $Re = 398$. This is basically the Re $\times$ gravity interaction where gravity matters more at some Re levels than others.
-
-For the mean, the best model is actually model 5, which is the same equation as above plus an St $\times$ gravity interaction.
-
-With $d$, it shows how curvy the St curve can be and I picked it by trying $d = 1$ to $d = 6$ and kept the one with the lowest CV error. The mean uses model 5 with $d = 4$, the variance uses model 4 with $d = 4$, and I used model 4 for skewness and kurtosis with $d = 2$.
+The $x$ terms make the St curve, $b_{224}$ and $b_{398}$ shift this curve for $Re = 224$ or $398$, $b_G$ shifts the curve for strong gravity, and $b_{224,G}$ and $b_{398,G}$ allow the effect of gravity to be different at each Re level. For the mean, the best model is model 5, which is the same equation as above plus an St $\times$ gravity interaction. $d$ represents how curvy the St curve can be, and is chosen by trying $d = 1$ to $6$ and keeping the lowest CV error.
 
 ## Results
 
