@@ -62,7 +62,7 @@ The data contains the first four raw moments of the cluster volumes in which I u
 
 ```{r}
 #| fig-width: 7
-#| fig-height: 3.3
+#| fig-height: 3.2
 ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   geom_point(size = 0.7) +
   geom_line(linewidth = 0.4) +
@@ -183,7 +183,7 @@ For uncertainty, the predictions are typically off by a factor of $e^{\text{CV e
 
 ```{r}
 #| fig-width: 7
-#| fig-height: 3.3
+#| fig-height: 3.2
 settings <- unique(train[, c("Re", "Fr", "Re_f", "Fr_f", "Grav")])
 st_range <- train |> group_by(Re, Fr) |>
   summarise(st_min = min(St), st_max = max(St), .groups = "drop")
