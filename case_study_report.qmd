@@ -4,7 +4,7 @@ author: "Johan Nino Espino"
 date: "October 27, 2026"
 format: pdf
 output: pdf_document
-font-size: 8px
+fontsize: 10pt
 execute:
     echo: false
     warning: false
@@ -226,7 +226,7 @@ deg_table <- data.frame(d = 1:6, round(deg_table, 3))
 knitr::kable(deg_table, row.names = FALSE)
 ```
 
-The first table shows the cross-validation error for each model. I see that using $\log(St)$ and adding a curved relationship with St in model 2 and model 3 slightly improves he prediction accuracy. But I do recognized a big improvement coming from model 4, which includes the interaction between Re and gravity. This does reduce the CV error by more than half for variance (1.69 to 0.79), skewness (0.62 to 0.23), and kurtosis (1.20 to 0.41). For the mean, I see that model 5 performs even better by allowing the effect of St to change depending on gravity, which reduced the CV error from 0.101 to 0.074.
+The first table shows the cross-validation error for each model. I see that using $\log(St)$ and adding a curved relationship with St in model 2 and model 3 slightly improves the prediction accuracy. But I do recognized a big improvement coming from model 4, which includes the interaction between Re and gravity. This does reduce the CV error by more than half for variance (1.69 to 0.79), skewness (0.62 to 0.23), and kurtosis (1.20 to 0.41). For the mean, I see that model 5 performs even better by allowing the effect of St to change depending on gravity, which reduced the CV error from 0.101 to 0.074.
 
 With these results, I need to consider the bias-variance tradeoff. With models 1 through 3, the models are too simple to capture important patterns in the data, which would lead to high bias. On the other hand, model 6 is too complex and would begin fitting random noise rather than the actual patterns in the data, which would result in high variance, and this could explain why the CV error for the mean increased.
 
@@ -234,7 +234,7 @@ In the first table, it show models 1 through 6 using a third-degree polynomial o
 
 As for uncertainty, the last row of the first table gives the CV error of my final models. Since I model on the log scale, it means that our predictions are typically off by a factor of $e^{\text{CV error}}$. With our final model, the mean has a CV error of 0.074 and $e^{0.074} \approx 1.08$, meaning that my predictions are typically off by about 8%. With this in mind, the prediction errors are approximately 25% for skewness, 50% for kurtosis, and a factor of 2 for variance. But I do note that my predictions are less reliable for test points where St falls outside the range of values used to build the models for their corresponding Re and Fr settings.
 
-## How Re, gravity, and St affects the cluster
+## How Re, gravity, and St affects the clusters
 
 ```{r}
 
@@ -288,7 +288,7 @@ knitr::kable(effects)
 
 The plots here shows my models' predictions across St, while the table showcases how much each statistical measures changes when I change one input at a time.
 
-My first big takeaway is that Re has the biggest effect. When Re increases from 90 to 224, I see that the average becomes about 33 times smaller while the skewness increases by about 5.6 times, which suggests that stronger turbulence do lead to more smaller clusters, but there are still a few very large clusters that make the distribution less balanced. Another thing I noticed is that gravity does have a greater effect whenever the turbulence is weaker. As shown from the table, when $Re = 90$, strong gravity increases the variance by about 765 times. But when $Re = 224$, the increase is only about 7 times, and I see that gravity has almost no effect when $Re = 398$. What this could tell us is that gravity causes particles to settle and form larger clusters while stronger turbulence breaks these clusters apart. Another observation to note is that the relationship with St is not linear. And the last thing I want to point out is that the four statistical measures respond differently to the input variable. In the plot, I see that increasing Re does decrease the mean cluster volume, but it also increase skewness and kurtosis. With the graph, I can also tell that gravity has little effect in the mean but significantly affects volume, skewness, and kurtosis. What this tells me is that gravity mainly changes how much the cluster sizes differ instead of significantly affecting their average cluster volume.
+My first big takeaway is that Re has the biggest effect. When Re increases from 90 to 224, I see that the average becomes about 33 times smaller while the skewness increases by about 5.6 times, which suggests that stronger turbulence do lead to more smaller clusters, but there are still a few very large clusters that make the distribution less balanced. Another thing I noticed is that gravity does have a greater effect whenever the turbulence is weaker. As shown from the table, when $Re = 90$, strong gravity increases the variance by about 765 times. But when $Re = 224$, the increase is only about 7 times, and I see that gravity has almost no effect when $Re = 398$. What this could tell us is that gravity causes particles to settle and form larger clusters while stronger turbulence breaks these clusters apart. Another observation to note is that the relationship with St is not linear. And the last thing I want to point out is that the four statistical measures respond differently to the input variable. In the plot, I see that increasing Re does decrease the mean cluster volume, but it also increase skewness and kurtosis. With the graph, I can also tell that gravity has little effect in the mean but significantly affects variance, skewness, and kurtosis. What this tells me is that gravity mainly changes how much the cluster sizes differ instead of significantly affecting their average cluster volume.
 
 ## Conclusion
 
