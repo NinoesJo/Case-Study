@@ -1,10 +1,9 @@
 ---
 title: "Case Study Report"
 author: "Johan Nino Espino"
-date: "October 27, 2026"
 format: pdf
 output: pdf_document
-fontsize: 10pt
+fontsize: 9pt
 execute:
     echo: false
     warning: false
@@ -13,9 +12,9 @@ execute:
 
 ## Introduction
 
-In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. So understanding how these particles come together to form clusters is very important as it can help explain things like how rain forms. The data set that I worked on contains 89 simulation runs in which each run involves three input variables. These variables include the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each simulation, I analyzed the distribution of cluster volumes by looking at four statistical measures, which includes mean, variance, skewness, and kurtosis. From my understanding, the mean tell us the average cluster volume, the variance measures how much the cluster volumes differ from the average, skewness describes whether the distribution is more spread out toward smaller or larger clusters, and kurtosis helps us understand how likely the distribution is to contain unusually small or large clusters.
+In this case study, I looked at simulations of tiny particles, such as water droplets in clouds for example, moving through turbulent air. Understanding how they form clusters can help explain things like how rain forms. The data set has 89 simulation runs with three input variables, that includes the Reynolds number (Re) which measures how turbulent the flow is, the Froude number (Fr) which tells how strong gravity is, and the Stokes number (St) which measures how much inertia the particles have. And for each run, I looked at four statistical measures, that includes the mean which is the average cluster volume, the variance which measures how much the cluster volumes differ from the average, the skewness which describes whether the distribution is more spread out toward smaller or larger clusters, and the kurtosis which tells us how likely the distribution is to contain unusually larger clusters.
 
-With this case study, I got two goals in mind. My first goal is that I want to predict these four statistical measures for new set of combinations of Re, Fr, and St. My second goal is that I want to understand how each input variable affects the cluster volume distribution and whether these effects differ across the four statistical measures. To do this, I use linear regression models on the log scale, which allows for a nonlinear relationship with St and an interaction between Re and gravity. I then select my models using cross-validation to evaluate how well these models predict new data. With this approach, it allows me to understand the influence of each variable while also keeping the models relatively simple and accurate.
+I had two objectives for this case study. The first goal is to predict these four statistical measures for new combinations of Re, Fr, and St. My second goal is to understand how each input affects the four statistical measures and whether these effects differ from one measure to another. To do this, I used log-scale liner regression models that are chosen by cross-validation.
 
 ## Methodology
 
