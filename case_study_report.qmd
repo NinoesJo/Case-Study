@@ -89,27 +89,25 @@ ggplot(long, aes(log_St, log(value), color = Fr_f)) +
 
 ### Models I tried
 
-I started with a simple linear model and then I kept increasing its complexity. Model 1 is linear in St, Re, and gravity, and model 2 is similar but uses $\log(St)$ instead. Model 3 uses a cubic polynomial in $\log(St)$. Model 4 adds an Re $\times$ gravity interaction on top of model 3, and model 5 is similar to model 4 but it also adds an St $\times$ gravity interaction. Model 6 is the most flexible as it fits a separate St curve for each of the 6 Re-gravity combinations, while model 7 and 8 are lasso and ridge versions of model 6 that shrink its coefficients to prevent overfitting. I chose the lasso and ridge penalty with cross-validation and then fit each model separately for each summary statistic.
+I started with a simple linear model and then I kept increasing its complexity, fitting each model separately for each summary statistic. Model 1 is linear in St, Re, and gravity, and model 2 is similar but uses $\log(St)$ instead. Model 3 uses a cubic polynomial in $\log(St)$. Model 4 adds an Re $\times$ gravity interaction. After that, I tested whether I could replace Fr with a simpler gravity variable that has two categories, which are strong gravity ($Fr = 0.052$) and weak or no gravity ($Fr = 0.3$ or $\infty$). This gave almost the same CV error, and F-tests found no difference between $Fr = 0.3$ and no gravity for the variance, skewness, and kurtosis ($p > 0.5$). For the mean, weak graivty did make a small difference of about 2% to 10% that was statisticall significant, but the CV error barely changed, so I kept the simpler gravity variable for all four summary statistics. From there, model 5 adds an St $\times$ gravity interaction to model 4 and model 6 adds an St $\times$ Re interaction instead. Model 7 fits a separate St curve for each of the 6 Re-gravity combinations, which has 24 coefficients for only 89 runs. Model 8 and model 9 are lasso and ridge versions of model 7. Ridge reduces the size of all coefficients to make the model more stable, while Lasso can shrink some coefficients to zero, helping identify which variables are most important. For both methods, I used cross-validation to determine the appropriate amount of regularization.
 
 ### Picking the best model
 
-I compared all the models with 10-fold cross-validation. I measured RMSE on the log scale, meaning that an RMSE of 0.1 meant that the predictions are usually off by roughly 10%. Since I wanted my models to be interpretable, I picked the simplest model that did nearly as well as the best one.
+I compared all the models with 10-fold cross-validation, which measures RMSE on the log scale, so an RMSE of 0.1 means the predictions are usually off by roughly 10%. Since I wanted my models to be interpretable, I focused on selecting simpler models that still performed well in cross-validation. I also repeated the model selection process using 20 different random splits to make sure that the results were consistent and not due to chance. For the interactions, I also used nested F-tests and only kept an interaction if it was statistically significant and it also lowered the CV error. Lasso also kept all the main effects and the interaction terms between Re and gravity do all four summary statistics, supporting my model selection decisions. I initially used polynomial regression to capture the nonlinear relationship with St, but polynomials can produce sharp curves near the edges of the data. This was especially concerning since my noisiest runs ($St = 0.05$) and four test points were located near these boundaries. To address this, I tested natural cubic splines and smoothing splines. All three methods had similar cross-validation errors for the mean (0.074 for polynomials, 0.070 for natural splines, and 0.075 for smoothing splines). However, polynomials have shown sharp changes outside the observed data while natural splines maintained a straight-line pattern beyond the boundaries. So I chose natural splines since they provided a more stable and reliable approach near the edges of the data.
 
 ### Final Model
 
-The final models that I selected were model 4 and model 5. The equation below is model 4. Let $x = \log(St)$. Let $R_{224} = 1$ if $Re = 224$ and $R_{398} = 1$ if $Re = 398$ (both would be 0 if Re = 90). And let $G = 1$ for strong gravity while $G = 0$ is for weak or no gravity.
+The final models that I selected were model 4 for the variance, skewness, and kurtosis, and model 5 for the mean, in which both using a natural spline in $\log(St)$. Let $x = \log(St)$. Let $R_{224} = 1$ if $Re = 224$ and $R_{398} = 1$ if $Re = 398$ (both would be 0 if Re = 90). And let $G = 1$ for strong gravity while $G = 0$ is for weak or no gravity. Then model 4 is
 
 $$
-\begin{aligned}
-\log(\text{summary}) = \; & \underbrace{b_0 + b_1 x + b_2 x^2 + \dots + b_d x^d}_{\text{curved effect of St}}
-+ \underbrace{b_{224} R_{224} + b_{398} R_{398}}_{\text{effect of Re}} \\
-& + \underbrace{b_G \, G}_{\text{effect of gravity}}
+\log(\text{summary}) = \underbrace{f(x)}_{\text{effect of St}}
++ \underbrace{b_{224} R_{224} + b_{398} R_{398}}_{\text{effect of Re}}
++ \underbrace{b_G \, G}_{\text{effect of gravity}}
 + \underbrace{b_{224,G} \, R_{224} G + b_{398,G} \, R_{398} G}_{\text{Re} \times \text{gravity}}
 + \varepsilon
-\end{aligned}
 $$
 
-The $x$ terms make the St curve, $b_{224}$ and $b_{398}$ shift this curve for $Re = 224$ or $398$, $b_G$ shifts the curve for strong gravity, and $b_{224,G}$ and $b_{398,G}$ allow the effect of gravity to be different at each Re level. For the mean, the best model is model 5, which is the same equation as above plus an St $\times$ gravity interaction. $d$ represents how curvy the St curve can be, and is chosen by trying $d = 1$ to $6$ and keeping the lowest CV error.
+where $f(x)$ here is the natural spline curve for St, $b_{224}$ and $b_{398}$ shift this curve for $Re = 224$ or $398$, $b_G$ shifts the curve for strong gravity, and $b_{224,G}$ and $b_{398,G}$ allow the effect of gravity to be different at each Re level. Model 5 for the mean also let $f(x)$ have a different shape under strong gravity. The degrees of freedom of $f(x)$ is chosen by the lowest CV error, which are 4, 6, 3, and 2 for the mean, variance, skewness, and kurtosis.
 
 ## Results
 
