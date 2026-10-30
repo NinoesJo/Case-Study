@@ -170,55 +170,28 @@ The interactions in the final models are also statistically significant. I used 
 ## How Re, gravity, and St affects the clusters
 
 ```{r}
-#| fig-width: 7
-#| fig-height: 3.2
-settings <- unique(train[, c("Re", "Fr", "Re_f", "Fr_f", "Grav")])
-st_range <- train |> group_by(Re, Fr) |>
-  summarise(st_min = min(St), st_max = max(St), .groups = "drop")
-grid <- merge(settings, data.frame(St = exp(seq(log(0.05), log(3), length.out = 60)))) |>
-  left_join(st_range, by = c("Re", "Fr")) |>
-  filter(St >= st_min, St <= st_max)        # only where we have data
-grid$log_St <- log(grid$St)
-
-curves <- bind_rows(lapply(names(final_fits), function(t) {
-  cbind(grid, target = t, fit = exp(predict(final_fits[[t]], newdata = grid)))
-}))
-curves$target <- factor(curves$target, levels = names(responses))
-
-ggplot(curves, aes(St, fit, color = Fr_f)) +
-  geom_line(linewidth = 0.5) +
-  geom_point(data = long, aes(St, value, color = Fr_f), inherit.aes = FALSE,
-             size = 0.6) +
-  facet_grid(target ~ Re_f, scales = "free_y",
-             labeller = labeller(Re_f = function(x) paste("Re =", x))) +
-  scale_x_log10(breaks = c(0.05, 0.1, 0.3, 1, 3)) +
-  scale_y_log10() +
-  scale_color_manual(values = fr_cols, name = "Fr") +
-  labs(x = "St (log scale)", y = "Summary (log scale)") +
-  theme_bw(base_size = 8) +
-  theme(legend.position = "bottom")
-```
-
-```{r}
-
 setting <- function(St, Re, Fr) prep(data.frame(St = St, Re = Re, Fr = Fr))
 fold_change <- function(fit, a, b) {
-  ratio <- unname(exp(predict(fit, newdata = a) - predict(fit, newdata = b)))
-  format(signif(ratio, 3), big.mark = ",", scientific = FALSE, trim = TRUE)
+  X <- model.matrix(delete.response(terms(fit)), rbind(a, b), xlev = fit$xlevels)
+  cvec <- X[1, ] - X[2, ]
+  est <- sum(cvec * coef(fit))
+  se <- sqrt(drop(t(cvec) %*% vcov(fit) %*% cvec))
+  q <- qt(0.975, df.residual(fit))
+  f <- function(v) format(signif(v, 2), big.mark = ",", scientific = FALSE, trim = TRUE)
+  paste0(f(exp(est)), " (", f(exp(est - q * se)), ", ", f(exp(est + q * se)), ")")
 }
 comparisons <- list(
   "Re 90 to 224"                   = list(setting(0.5, 224, Inf),   setting(0.5, 90, Inf)),
-  "Re 224 to 398"                  = list(setting(0.5, 398, Inf),   setting(0.5, 224, Inf)),
-  "Strong vs. no gravity, Re 90"   = list(setting(0.5, 90, 0.052),  setting(0.5, 90, Inf)),
-  "Strong vs. no gravity, Re 224"  = list(setting(0.5, 224, 0.052), setting(0.5, 224, Inf)),
-  "Strong vs. no gravity, Re 398"  = list(setting(0.5, 398, 0.052), setting(0.5, 398, Inf))
+  "Strong gravity, Re 90"   = list(setting(0.5, 90, 0.052),  setting(0.5, 90, Inf)),
+  "Strong gravity, Re 224"  = list(setting(0.5, 224, 0.052), setting(0.5, 224, Inf)),
+  "Strong gravity, Re 398"  = list(setting(0.5, 398, 0.052), setting(0.5, 398, Inf))
 )
 effects <- sapply(final_fits, function(fit)
   sapply(comparisons, function(cc) fold_change(fit, cc[[1]], cc[[2]])))
 knitr::kable(effects)
 ```
 
-As the table shows, it suggests that Re has the biggest effect. Increasing the Re from 90 to 224 makes the mean about 33 times smaller while the skewness becomes about 5.6 times larger, which suggests that stronger turbulence leads to smaller clusters, but there are still a few clusters much larger than the typical one that make the distribution less balanced. Another thing to note is that strong gravity does have a greater effect whenever the turbulence is weaker. From the table, strong gravity increases the variance about 765 times at $Re = 90$, only about 7 times at $Re = 224$, and lowers the variance to about half at $Re = 398$. This could mean that gravity causes particles to settle and form larger clusters while stronger turbulence breaks these clusters apart. From the plots, it appears that gravity has little effect in the mean but strongly affects variance, skewness, and kurtosis. This suggests that gravity mainly changes how much the cluster sizes differ rather than the average cluster volume.
+The table above compares two settings at a time, where a setting is just one combination of Re, Fr, and St, and it shows how many times larger or smaller each summary statistic becomes alongside with a 95% confidence interval. In each row, only one input changes. Unless stated otherwise, the comparisons are made at $St = 0.5$ with no gravity. The results show that Re has the greatest effect. Increasing the Re from 90 to 224 would make the mean about 30 times smaller while the skewness becomes about 5.7 times larger. What this suggest is that stronger turbulence generally produces smaller clusters, although a few clusters can still be much larger than the others. Another thing to note is that strong gravity does have a greater effect whenever the turbulence is weaker. Like from the table, strong gravity increases the variance about 765 times at $Re = 90$, only about 7 times at $Re = 224$, and lowers the variance to about half at $Re = 398$. This could mean that gravity causes particles to settle and form larger clusters while stronger turbulence breaks these clusters apart. I see that gravity changes the mean by at most about 40%, so gravity mainly changes how much cluster sizes differ rather than the average cluster volume.
 
 ## Conclusion
 
