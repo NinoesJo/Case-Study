@@ -21,10 +21,11 @@ Since inference is one of my main goals, I used interpretable log-scale linear m
 ## Methodology
 
 ```{r}
-
 library(ggplot2)
 library(dplyr)
 library(tidyr)
+library(glmnet)
+library(splines)
 
 train <- read.csv("data/data-train.csv")
 test  <- read.csv("data/data-test.csv")
@@ -48,6 +49,12 @@ prep <- function(d) {
 train <- prep(train)
 test  <- prep(test)
 
+train <- train |>
+  mutate(log_mean = log(mean), log_variance = log(variance),
+         log_skewness = log(skewness), log_kurtosis = log(kurtosis))
+responses <- c(Mean = "log_mean", Variance = "log_variance",
+               Skewness = "log_skewness", Kurtosis = "log_kurtosis")
+
 long <- train |>
   select(St, log_St, Re_f, Fr_f, mean, variance, skewness, kurtosis) |>
   pivot_longer(mean:kurtosis, names_to = "target", values_to = "value") |>
@@ -60,13 +67,15 @@ fr_cols <- c("0.052" = "#D55E00", "0.3" = "#0072B2", "Inf" = "#009E73")
 
 ### Preparing the data
 
-The data contains the first four raw moments of the cluster volumes in which I used to calculate the mean, variance, skewness, and kurtosis. All four summary statistics have a huge range, such as the variance ranges from about $10^{-4}$ to $10^{3}$. Therefore, I took the log of each statistical measure before building my models. With the data, Re and Fr only have three values each, so I treated these variables as categorical. On the other hand, St has 14 values that are mostly bunched near 0, so I used $\log(St)$ to spread out these values.
+The data contains the first four raw moments of the cluster volumes in which I used to calculate the mean, variance, skewness, and kurtosis. All four summary statistics have a huge range, such as the variance ranges from about $10^{-4}$ to $10^{3}$, thus I need to transform them. To pick a transformation, I sued the Box-Cox method, which just finds the power $\lambda$ that best fits the data where $\lambda = 0$ means taking the log. For all four summary statistics, the best $\lambda$ was very close to 0 and the log transformation also had a lower CV error than the other options that I tried. So I took the log of each summary statistic which also makes each effect easy to read as how many times larger or smaller a summary statistics has become. Re and Fr only have three values each, so I treated them as categorical, while St has 14 values bunched near 0, so I used $\log(St)$. One limitation of doing this method is that categorical Re and Fr mean my models can only predict and make inference at the simulated values, not for values that were not tested.
 
 ### What I saw in the data
 
+The figure below showcases the result from all 89 simulation runs for each of the four summary statistics. Each line connects runs with the same Fr level, which allows me to see how St affects the results while Re and Fr remain constant. The figure showed me three important things about the data. The first observation is that the relationship with St is not linear even after taking $\log(St)$. The second observation is that Re and Fr seem to interact. It is seen that strong gravity ($Fr = 0.052$) greatly increases the variance, skewness, and kurtosis at $Re = 90$, but it increases less at $Re = 224$ and it barely increases at $Re = 398$. The third observation is that the lines for $Fr = 0.3$ and $Fr = \infty$ are almost identical.
+
 ```{r}
 #| fig-width: 7
-#| fig-height: 3.2
+#| fig-height: 2.5
 ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   geom_point(size = 0.7) +
   geom_line(linewidth = 0.4) +
@@ -77,8 +86,6 @@ ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   theme_bw(base_size = 8) +
   theme(legend.position = "bottom")
 ```
-
-This figure showed me three important things about the data. The first observation is that the relationship with St is not linear even after taking $\log(St)$, so I added polynomial terms in my models to better capture these nonlinear patterns. The second observation is that Re and Fr interact. It is seen that strong gravity ($Fr = 0.052$) greatly increases the variance, skewness, and kurtosis at $Re = 90$, but it increases less at $Re = 224$ and it barely increases at $Re = 398$. Thus I added an Re $\times$ gravity interaction in my models to account for this relationship. The third observation is that the lines for $Fr = 0.3$ and $Fr = \infty$ are almost identical, so I replaced Fr with a simpler gravity variable that has two categories, which are strong gravity ($Fr = 0.052$) and weak or no gravity ($Fr = 0.3$ or $\infty$). This approach predicts just as well and is easier to interpret.
 
 ### Models I tried
 
