@@ -75,7 +75,7 @@ The figure below showcases the result from all 89 simulation runs for each of th
 
 ```{r}
 #| fig-width: 7
-#| fig-height: 2.5
+#| fig-height: 3.2
 ggplot(long, aes(log_St, log(value), color = Fr_f)) +
   geom_point(size = 0.7) +
   geom_line(linewidth = 0.4) +
@@ -195,4 +195,4 @@ The table above compares two settings at a time, where a setting is just one com
 
 ## Conclusion
 
-So using cross-validation, model 4 was the best simpler model for the variance, skewness, and kurtosis, while model 5 was the best for the mean since it accounts for how the relationship between St and the mean cluster volume changes with the strength of gravity. These models provide accurate predictions while staying simple enough to understand how each input variable affects the cluster volumes. However, one limitation is that some test points have St values outside the training range, so those predictions are less reliable. My main finding is that Re has the strongest effect on cluster volumes, which shrinks the average cluster volume but it raises the skewness and kurtosis. Another finding is that gravity only matters when it is strong, and its effect fades as turbulence grows. Also that gravity changes the average cluster size only slightly and mainly changes how much cluster sizes vary. And finally, St has a nonlinear effect on all four summary statistics.
+To conclude, model 4 was selected for variance, skewness, and kurtosis, while model 5 was selected for the mean. Both of these models use natural splines to capture the nonlinear relationship with St and include interaction terms that are statistically significant and that it improves the cross-validation performance. These models do provide accurate predictions while remaining simple enough to interpret and make them useful for understanding how the input variables affect the results. My main findings show that Re has the greatest effect on the results while gravity only has a noticeable effect when it is strong as its influence becomes weaker as turbulence increases. One limitation is that Re and Fr are treated as categorical variables, meaning that the models cannot make predictions or draw out conclusions for values that were not tested. Such that the models cannot reliably predict results for St values outside the simulated range of 0.05 to 3. The models also assume that St follows the same curve across all settings, even though there may be some differences. Since the amount of noise varies between settings, the confidence intervals may not be completely accurately. So running more simulations with different Re and Fr values would help address these limitations as well as improve the reliability of the results.

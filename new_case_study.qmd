@@ -1,0 +1,1124 @@
+---
+title: "STA 325 Case Study: Particle Clusters in Turbulence"
+author: "Johan Nino Espino"
+date: "October 29, 2026"
+format: pdf
+output: pdf_document
+font-size: 8px
+---
+
+# Setup
+
+**Goal.** Our collaborators ran 89 expensive DNS simulations of particles in turbulence. For each run they recorded three inputs, the Reynolds number Re (how turbulent the flow is), the Froude number Fr (how strong gravity is) and the Stokes number St (how much inertia the particles have), and the first four raw moments of the particle cluster volumes. They want two things.
+
+1.  **Inference.** Which inputs change the cluster-volume distribution, how big the effects are, whether the effects are linear, and whether they are the same for the mean, variance, skewness and kurtosis.
+2.  **Prediction.** The four summaries at new input settings, with uncertainty.
+
+# Why do we need machine learning for this problem?
+
+The collaborators are scientists, and they already have a scientific model: the DNS itself, which solves the Navier-Stokes equations for the flow and tracks every particle. So a fair question is why they need a machine learning model on top of that. There are four reasons.
+
+**1. The scientific model is too expensive to run everywhere.** DNS resolves every scale of the flow, which makes it computationally prohibitive, and it cannot be run at the very large Reynolds numbers of real clouds and oceans (around $10^7$, compared with 90 to 398 here). That is why there are only 89 runs. Every new (Re, Fr, St) setting the scientists want to know about would need another full simulation. A machine learning model trained on the 89 runs acts as a fast **surrogate** for the DNS: once it is fit, a prediction at a new setting takes a fraction of a second, and it comes with an estimate of how far off it might be.
+
+**2. There is no simple formula to read the answer from.** The DNS gives numbers for one setting at a time, not an equation that says how the cluster-volume distribution depends on Re, Fr and St together. If such a formula existed, the scientists would not need to run a simulation at each setting. The relationship has to be **learned from the data**, and the data turned out to contain things that would have been hard to guess ahead of time: the St effect is curved, Fr = 0.3 acts like no gravity, and the gravity effect fades as turbulence grows. A learning approach lets the data show these patterns, and cross-validation checks that they are real and not noise.
+
+**3. The raw runs cannot answer the questions on their own.** Looking at the 89 runs directly is not enough.
+
+-   Every run is a single simulation at one setting, with no repeats. To say what St does *while holding Re and Fr fixed*, or whether the effect of gravity depends on Re, we need a model that separates the inputs and puts a size and a confidence interval on each effect.
+-   The test set asks for St values that were never run at that (Re, Fr) setting. A model borrows strength from all 89 runs instead of only the 10 or so runs at the same setting. The section *Do we need a model?* checks this directly: two "no model" approaches (averaging or interpolating the neighbouring runs) predict much worse than the final model.
+-   With only 89 runs and many possible terms (curves in St, interactions), the data cannot support everything at once. Deciding which effects are real is a **variable selection** problem, and that is exactly what statistical learning tools do (cross-validation, the one-standard-error rule, nested F-tests, lasso).
+
+**4. The collaborators want understanding, not just numbers.** Their main goal is **inference**: which inputs matter, how much, and whether the effects are linear or the same for every summary. So the type of machine learning matters as much as using machine learning at all.
+
+## What kind of machine learning: interpretable, not a black box
+
+A flexible black box (a neural network or a large random forest) could in principle predict well, but it would not serve the collaborators.
+
+-   **It would not answer their questions.** A black box gives a prediction but no simple statement like "strong gravity multiplies the variance by about 750 at Re = 90, with a 95% confidence interval." It also has no direct way to test whether an effect is linear or whether two inputs interact.
+-   **89 runs is too little data for it.** Highly flexible models need far more data, and with so few runs they would overfit. Even the most flexible model we try, the full three-way interaction model with 24 coefficients, already overfits the mean, and for the other summaries it is no better than a much simpler model.
+-   **It cannot be checked against physics.** Scientists trust a model more when its pieces can be compared with what they know physically. A black box hides its pieces.
+
+Instead we use **interpretable statistical learning**: linear models on the log scale, with a flexible but smooth curve for St (a natural spline, as in a generalized additive model from class) and a small number of clearly named interaction terms. This keeps the flexibility needed to fit the nonlinear patterns, and every part of the model still means something. Each scientific question maps onto a specific part of the model and a specific tool:
+
+| Collaborators' question | Model term | How we answer it |
+|------------------------|------------------------|------------------------|
+| How does Re change the distribution? | Re effect | Fold-change with 95% CI |
+| Does gravity matter, and how much? | Gravity effect | Fold-change with 95% CI; F-test |
+| Is the effect of St linear? | Spline in log St | CV: straight line vs curve |
+| Does the gravity effect depend on Re? | Re $\times$ gravity | F-test, coefficient p-values, CV |
+| Does the St curve depend on gravity? | St $\times$ gravity | F-test and CV |
+| Is weak gravity the same as none? | Two-level gravity | Nested F-test and CV |
+| Are effects the same for all four summaries? | Separate model per summary | Compare effects across models |
+| How sure are we about a new prediction? | Whole model | Prediction intervals; CV error |
+
+Because the models are linear in their coefficients, all the usual inference tools (standard errors, confidence intervals, F-tests and p-values) carry over directly, and effects on the log scale turn into easy-to-read fold-changes ("times larger or smaller").
+
+**How the two kinds of model work together.** The machine learning model does not replace the DNS. It summarizes what the 89 runs say in a few interpretable effects, predicts cheaply between them, and shows where it is least certain. Those are the places (for example Re between the simulated levels, or Fr between 0.052 and 0.3) where the scientists would get the most from running new simulations.
+
+Put `data-train.csv` and `data-test.csv` in a folder called `data` next to this file.
+
+```{r}
+#| label: packages
+#| message: false
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(glmnet)
+library(MASS)      # boxcox()
+library(splines)   # ns() natural cubic splines
+library(mgcv)      # gam() smoothing splines
+select <- dplyr::select   # MASS also has a select()
+theme_set(theme_bw(base_size = 10))
+```
+
+## Load the data
+
+```{r}
+#| label: load
+train <- read.csv("data/data-train.csv")
+test  <- read.csv("data/data-test.csv")
+dim(train); dim(test)
+colSums(is.na(train))   # no missing values; read.csv reads "Inf" as Inf
+```
+
+## Convert raw moments to the four targets
+
+The data give the raw moments $m_k = E[X^k]$. With $\mu = m_1$, expanding $E[(X-\mu)^k]$ gives the central moments:
+
+$$
+\sigma^2 = m_2 - m_1^2, \qquad
+\mu_3 = m_3 - 3m_1m_2 + 2m_1^3, \qquad
+\mu_4 = m_4 - 4m_1m_3 + 6m_1^2m_2 - 3m_1^4,
+$$
+
+so skewness $= \mu_3/\sigma^3$ and kurtosis $= \mu_4/\sigma^4$.
+
+```{r}
+#| label: convert
+m1 <- train$R_moment_1; m2 <- train$R_moment_2
+m3 <- train$R_moment_3; m4 <- train$R_moment_4
+
+train$mean     <- m1
+train$variance <- m2 - m1^2
+mu3 <- m3 - 3 * m1 * m2 + 2 * m1^3
+mu4 <- m4 - 4 * m1 * m3 + 6 * m1^2 * m2 - 3 * m1^4
+train$skewness <- mu3 / train$variance^1.5
+train$kurtosis <- mu4 / train$variance^2
+
+# Checks: variance must be positive; all four targets positive (needed for
+# log and Box-Cox transforms)
+sum(train$variance <= 0)
+sapply(train[, c("mean", "variance", "skewness", "kurtosis")],
+       function(x) sum(x <= 0))
+```
+
+## Encode the inputs
+
+Re and Fr each take only three values, so both are treated as **categories** (factors). St takes 14 values and stays numeric.
+
+```{r}
+#| label: encode
+encode <- function(d) {
+  d$Re_f <- factor(d$Re, levels = c(90, 224, 398))
+  d$Fr_f <- factor(d$Fr, levels = c(0.052, 0.3, Inf),
+                   labels = c("0.052", "0.3", "Inf"))
+  d$log_St <- log(d$St)
+  d
+}
+train <- encode(train)
+test  <- encode(test)
+
+table(Re = train$Re_f, Fr = train$Fr_f)   # training runs per setting
+table(Re = test$Re_f,  Fr = test$Fr_f)    # test runs per setting
+```
+
+Every test setting of (Re, Fr) also appears in training. There are no runs at Re = 398 with Fr = 0.3.
+
+**Why categorical, and what it costs.** With only three values, a categorical Re fits a separate level for each value, which is the most flexible fit possible through three points. It is exactly the same fit as a quadratic in Re (three points determine a quadratic), so nothing is lost compared to a numeric coding:
+
+```{r}
+#| label: categorical-check
+f_cat  <- lm(log(mean) ~ log_St + Re_f, data = train)
+f_quad <- lm(log(mean) ~ log_St + poly(Re, 2), data = train)
+all.equal(fitted(f_cat), fitted(f_quad))     # identical fits
+# A numeric *linear* coding is a real restriction (one straight line in log Re)
+c(categorical = summary(f_cat)$sigma,
+  linear_log_Re = summary(lm(log(mean) ~ log_St + log(Re), data = train))$sigma)
+```
+
+The cost is a **limitation**, not a fitting problem: a categorical model only knows the three Re values and the three Fr values that were simulated. It cannot predict or make inference at, for example, Re = 300 or Fr = 0.1, and nothing in the data tells us how the summaries behave between or beyond the simulated levels. Any statement about the effect of Re or Fr in this report is a statement about these specific levels. The same caution applies to St outside 0.05 to 3.
+
+# Exploratory data analysis
+
+```{r}
+#| label: long-format
+targets <- c("mean", "variance", "skewness", "kurtosis")
+fr_cols <- c("0.052" = "#D55E00", "0.3" = "#0072B2", "Inf" = "#009E73")
+
+long <- train |>
+  select(St, log_St, Re_f, Fr_f, all_of(targets)) |>
+  pivot_longer(all_of(targets), names_to = "target", values_to = "value") |>
+  mutate(target = factor(target, levels = targets))
+nrow(long)   # 89 runs x 4 summaries = 356 points
+```
+
+## Each target on its own: is a transformation needed?
+
+```{r}
+#| label: histograms
+#| fig-height: 4.5
+hist_df <- bind_rows(
+  mutate(long, scale = "Raw scale", x = value),
+  mutate(long, scale = "Log scale", x = log(value))
+) |> mutate(scale = factor(scale, levels = c("Raw scale", "Log scale")))
+
+ggplot(hist_df, aes(x)) +
+  geom_histogram(bins = 20, fill = "grey55", color = "white") +
+  facet_wrap(scale ~ target, scales = "free", nrow = 2) +
+  labs(x = NULL, y = "Count")
+
+# How many times larger is the largest value than the smallest?
+sapply(train[, targets], function(x) signif(max(x) / min(x), 2))
+```
+
+**Reading the plot.** The top row shows each summary on its raw scale: almost every run is piled up near zero with a few huge values, so a model on this scale would be driven by a handful of runs. The bottom row shows the same values after a log: they spread out over a sensible range. The largest variance is about ten million times the smallest.
+
+```{r}
+#| label: spread-by-cell
+# Spread within each (Re, Fr) setting, raw vs log scale. A transform is
+# useful if it makes the spread similar across settings.
+long |>
+  group_by(target, Re_f, Fr_f) |>
+  summarise(raw_sd = sd(value), log_sd = sd(log(value)), .groups = "drop") |>
+  group_by(target) |>
+  summarise(raw_sd_ratio = signif(max(raw_sd) / min(raw_sd), 2),
+            log_sd_ratio = signif(max(log_sd) / min(log_sd), 2))
+```
+
+On the raw scale the spread in the most variable setting is up to millions of times the spread in the least variable one. On the log scale the ratio is small. A linear model assumes roughly equal spread, so a transformation is clearly needed. The next question is which one.
+
+## Which transformation? Box-Cox
+
+The log is a natural first guess, but it is only one member of the **Box-Cox** family
+
+$$
+y^{(\lambda)} = \begin{cases} (y^\lambda - 1)/\lambda & \lambda \neq 0 \\ \log y & \lambda = 0, \end{cases}
+$$
+
+which also includes no transform ($\lambda = 1$), the square root ($\lambda = 0.5$) and the reciprocal ($\lambda = -1$). Box-Cox picks $\lambda$ by maximum likelihood for a given model. We use a flexible starting model (a cubic curve in log St plus Re $\times$ Fr) so that $\lambda$ is not chosen to make up for a missing term.
+
+```{r}
+#| label: boxcox
+bc_rhs <- "poly(log_St, 3) + Re_f * Fr_f"
+bc_table <- t(sapply(targets, function(y) {
+  bc <- boxcox(as.formula(paste(y, "~", bc_rhs)), data = train,
+               lambda = seq(-1, 1, 0.005), plotit = FALSE)
+  ci <- range(bc$x[bc$y > max(bc$y) - qchisq(0.95, 1) / 2])
+  c(lambda_hat = bc$x[which.max(bc$y)], lower_95 = ci[1], upper_95 = ci[2])
+}))
+round(bc_table, 3)
+```
+
+```{r}
+#| label: boxcox-plot
+#| fig-height: 2.6
+bc_curves <- bind_rows(lapply(targets, function(y) {
+  bc <- boxcox(as.formula(paste(y, "~", bc_rhs)), data = train,
+               lambda = seq(-0.5, 0.5, 0.005), plotit = FALSE)
+  data.frame(target = y, lambda = bc$x, loglik = bc$y - max(bc$y))
+})) |> mutate(target = factor(target, levels = targets))
+ggplot(bc_curves, aes(lambda, loglik)) +
+  geom_line() +
+  geom_hline(yintercept = -qchisq(0.95, 1) / 2, linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "#D55E00") +
+  facet_wrap(~ target, nrow = 1) +
+  coord_cartesian(ylim = c(-8, 0)) +
+  scale_x_continuous(breaks = c(-0.5, 0, 0.5)) +
+  labs(x = expression(lambda), y = "Profile log-likelihood (max = 0)")
+```
+
+**Reading the plot.** Each curve shows how well each $\lambda$ fits. Values of $\lambda$ above the dashed line are inside the 95% confidence interval. The orange line is $\lambda = 0$, the log. For all four summaries the best $\lambda$ is very close to 0 and the interval includes 0, while it excludes the square root and no transform by a wide margin.
+
+As a second check, compare transformations by how well they predict. Each one is fit with 10-fold CV, the predictions are transformed back to the original scale, and the error is measured as the RMSE of log(prediction) $-$ log(truth) so that all transformations are judged on the same scale. (This is a relative error, which suits summaries that span many orders of magnitude.) For Box-Cox, $\lambda$ is re-estimated inside each training fold.
+
+```{r}
+#| label: boxcox-cv
+set.seed(325)
+folds <- sample(rep(1:10, length.out = nrow(train)))
+
+bc_cv <- function(y, lam = NULL) {
+  pred <- numeric(nrow(train))
+  for (k in 1:10) {
+    tr <- train[folds != k, ]; te <- train[folds == k, ]
+    f0 <- as.formula(paste(y, "~", bc_rhs))
+    l <- if (is.null(lam)) {
+      bc <- boxcox(f0, data = tr, lambda = seq(-1, 1, 0.005), plotit = FALSE)
+      bc$x[which.max(bc$y)]
+    } else lam
+    tr$z <- if (l == 0) log(tr[[y]]) else (tr[[y]]^l - 1) / l
+    zp <- predict(lm(as.formula(paste("z ~", bc_rhs)), data = tr), te)
+    # back-transform (guard against values outside the allowed range)
+    pred[folds == k] <- if (l == 0) zp else log(pmax(l * zp + 1, 1e-12)) / l
+  }
+  sqrt(mean((log(train[[y]]) - pred)^2))
+}
+sapply(targets, function(y) c(
+  "None (lambda = 1)"   = bc_cv(y, 1),
+  "Square root (0.5)"   = bc_cv(y, 0.5),
+  "Log (0)"             = bc_cv(y, 0),
+  "Box-Cox lambda_hat"  = bc_cv(y))) |> round(3)
+```
+
+**Decision: model the log of every target.** No transform and the square root predict terribly. The estimated Box-Cox $\lambda$ predicts slightly *worse* than the plain log, because $\hat\lambda$ is noisy and re-estimating it adds variance without reducing bias. The log is inside every Box-Cox interval, predicts best, and is the easiest to interpret: a change of $b$ on the log scale is a fold-change of $e^b$ on the original scale, so effects are read as "times larger or smaller". Back-transformed predictions are always positive.
+
+```{r}
+#| label: log-targets
+train <- train |>
+  mutate(log_mean = log(mean), log_variance = log(variance),
+         log_skewness = log(skewness), log_kurtosis = log(kurtosis))
+responses <- c(Mean = "log_mean", Variance = "log_variance",
+               Skewness = "log_skewness", Kurtosis = "log_kurtosis")
+```
+
+## Nonlinearity: how does each target change with St?
+
+```{r}
+#| label: st-plots
+#| fig-height: 7
+ggplot(long, aes(St, log(value), color = Fr_f)) +
+  geom_point(size = 1.3) + geom_line() +
+  facet_grid(target ~ Re_f, scales = "free_y",
+             labeller = labeller(Re_f = function(x) paste("Re =", x))) +
+  scale_color_manual(values = fr_cols, name = "Fr") +
+  labs(x = "St", y = "log(target)") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: st-plots-log
+#| fig-height: 7
+ggplot(long, aes(log_St, log(value), color = Fr_f)) +
+  geom_point(size = 1.3) + geom_line() +
+  facet_grid(target ~ Re_f, scales = "free_y",
+             labeller = labeller(Re_f = function(x) paste("Re =", x))) +
+  scale_color_manual(values = fr_cols, name = "Fr") +
+  labs(x = "log(St)", y = "log(target)") +
+  theme(legend.position = "bottom")
+```
+
+**Reading the plot.** This is the main EDA plot: all 89 runs $\times$ 4 summaries = 356 points. Each row is one summary, each column is one Re level, and each colored line connects the runs at one Fr level in order of St. So one line is one (Re, Fr) setting, and moving along a line shows the effect of St with Re and Fr held fixed. Comparing lines of different colors in the same panel shows the effect of gravity, and comparing the same color across columns shows the effect of Re.
+
+-   **St.** Every line changes sharply between St = 0.05 and 0.2 and then slowly, so the St effect is clearly **nonlinear**. Using log(St) spreads out the small St values and makes the curves smoother, but they still bend, so a straight line in log(St) will not be enough.
+-   **Re.** The y-axis is shared within a row, so the jump between columns is the effect of Re. The mean drops sharply from Re = 90 to 224, and skewness and kurtosis rise.
+-   **Fr.** The orange line (strong gravity, Fr = 0.052) stands apart from the others mainly at Re = 90 for variance, skewness and kurtosis, and the gap shrinks as Re grows. The blue (Fr = 0.3) and green (Fr = Inf) lines nearly lie on top of each other.
+-   **Shape of the curves.** Within a panel, the lines are roughly parallel, which suggests the St curve has a similar shape in every setting. The clearest exception is the mean under strong gravity, which flattens at large St.
+
+## Interactions: does the effect of one input depend on another?
+
+```{r}
+#| label: interaction-plot
+#| fig-height: 3.2
+cell_means <- long |>
+  group_by(target, Re_f, Fr_f) |>
+  summarise(avg = mean(log(value)), .groups = "drop")
+
+ggplot(cell_means, aes(Re_f, avg, color = Fr_f, group = Fr_f)) +
+  geom_point(size = 2) + geom_line() +
+  facet_wrap(~ target, scales = "free_y", nrow = 1) +
+  scale_color_manual(values = fr_cols, name = "Fr") +
+  labs(x = "Re", y = "Average log(target) over St")
+```
+
+**Reading the plot.** Each point is the average log summary over all St values at one (Re, Fr) setting. If the effect of gravity did not depend on Re, the three lines would be parallel (the gap between colors would be the same at every Re). For variance, skewness and kurtosis the lines are far from parallel: strong gravity has a large effect at Re = 90, a smaller one at Re = 224 and almost none at Re = 398. So **Re and Fr appear to interact**. For the mean, the lines are close to parallel. Together with the St plots, this gives three candidate interactions to test formally in *Which interactions?* below: Re $\times$ Fr (clear), St $\times$ Fr (possible, mainly for the mean) and St $\times$ Re (no clear sign, but worth checking).
+
+## How much of the variation is between settings?
+
+```{r}
+#| label: variation
+# Share of the variance of each log summary explained by the (Re, Fr)
+# setting alone (between settings) vs. what is left (mostly St, within settings)
+sapply(responses, function(y) {
+  r2 <- summary(lm(as.formula(paste(y, "~ Re_f * Fr_f")), data = train))$r.squared
+  c(between_settings = r2, within_settings = 1 - r2)
+}) |> round(2)
+```
+
+For all four summaries, almost all of the variation (87% to 99%) is *between* (Re, Fr) settings, and only a small part is *within* a setting, where St is the only thing changing. So getting Re, Fr and their interaction right matters most, which matches the CV results below where the Re $\times$ Fr interaction is the biggest improvement. St still matters (most for the variance, 13%), and because the within-setting variation is small, the St curve has to be estimated carefully, which is why the noisy runs at St = 0.05 stand out.
+
+## Skewness and kurtosis carry the same information
+
+```{r}
+#| label: skew-kurt
+#| fig-height: 3
+ggplot(train, aes(skewness, kurtosis, color = Fr_f)) +
+  geom_point() + scale_x_log10() + scale_y_log10() +
+  scale_color_manual(values = fr_cols, name = "Fr")
+coef(lm(log_kurtosis ~ log_skewness, data = train))
+cor(train$log_kurtosis, train$log_skewness)
+```
+
+**Reading the plot.** Each point is one run. On log axes the points fall on a straight line with slope about 2, so log(kurtosis) $\approx$ 2 log(skewness), that is kurtosis $\approx$ skewness$^2$: expect the two models to tell the same story.
+
+## EDA summary
+
+-   **Transformation:** log of every target (confirmed by Box-Cox); log(St) as the St variable.
+-   **Nonlinearity:** strong in St, even on the log scale.
+-   **Interactions to test:** Re $\times$ Fr (clear), St $\times$ Fr (possible), St $\times$ Re (unclear).
+-   **Possible simplification:** Fr = 0.3 looks like no gravity (tested in *Simplifying gravity*, after the models are introduced with all three Fr levels).
+
+# Starting models with all three Fr levels
+
+All models use log(target) as the response and are fit separately for each target. We start with the inputs exactly as given (three-level Fr) and add one idea at a time.
+
+| Model | Right-hand side | Idea added |
+|------------------------|------------------------|------------------------|
+| M1 Linear | St + Re + Fr | Baseline: additive and linear |
+| M2 Log St | log(St) + Re + Fr | Log-transformed St |
+| M3 Polynomial | poly(log St, 3) + Re + Fr | Curved St effect |
+| M4 Re $\times$ Fr | poly(log St, 3) + Re $\times$ Fr | Fr effect depends on Re |
+
+A polynomial is a good first way to add curvature: it is still a linear model (the powers of log St are just new predictors), so estimation, confidence intervals and tests work exactly as in ordinary regression. The section *How to model the nonlinearity in St* revisits this choice.
+
+```{r}
+#| label: cv-helpers
+# 10-fold CV RMSE (log scale) and its standard error for any formula
+cv_formula <- function(f, fo = folds, fitfun = lm) {
+  y <- all.vars(f)[1]
+  pred <- numeric(nrow(train))
+  for (k in 1:10) {
+    fit <- fitfun(f, data = train[fo != k, ])
+    pred[fo == k] <- predict(fit, newdata = train[fo == k, ])
+  }
+  err <- train[[y]] - pred
+  c(cv_RMSE = sqrt(mean(err^2)),
+    SE = sd(tapply(err, fo, function(e) sqrt(mean(e^2)))) / sqrt(10))
+}
+cv_table <- function(rhs_vec, ys = responses) {
+  sapply(ys, function(y) sapply(rhs_vec, function(r)
+    cv_formula(as.formula(paste(y, "~", r)))["cv_RMSE"]))
+}
+```
+
+```{r}
+#| label: start-models
+rhs_fr <- c(
+  "M1 Linear"     = "St + Re_f + Fr_f",
+  "M2 Log St"     = "log_St + Re_f + Fr_f",
+  "M3 Polynomial" = "poly(log_St, 3) + Re_f + Fr_f",
+  "M4 Re x Fr"    = "poly(log_St, 3) + Re_f * Fr_f"
+)
+start_cv <- cv_table(rhs_fr)
+dimnames(start_cv) <- list(names(rhs_fr), names(responses))
+knitr::kable(round(start_cv, 3),
+             caption = "10-fold CV RMSE, log scale (three-level Fr)")
+```
+
+An RMSE of $r$ on the log scale means predictions are typically off by a factor of about $e^r$ (for example, 0.10 $\approx$ 10%). Using log(St) and a curve in log(St) helps a little; adding the Re $\times$ Fr interaction cuts the CV error for variance, skewness and kurtosis by more than half. This interaction is the single most important term.
+
+# Simplifying gravity: is Fr = 0.3 the same as no gravity?
+
+The EDA suggested that only strong gravity matters. A simpler, physically meaningful coding is a two-level gravity variable: *strong* (Fr = 0.052) or *weak/none* (Fr = 0.3 or Inf).
+
+```{r}
+#| label: gravity
+add_grav <- function(d) {
+  d$Grav <- factor(ifelse(d$Fr == 0.052, "strong", "weak/none"),
+                   levels = c("weak/none", "strong"))
+  d
+}
+train <- add_grav(train)
+test  <- add_grav(test)
+table(Re = train$Re_f, Gravity = train$Grav)
+```
+
+The gravity model is **nested** in the three-level Fr model (it forces the Fr = 0.3 and Fr = Inf effects to be equal), so we can test the simplification with an F-test as well as with CV. We check it in the M4 structure and, for the mean, also with the St $\times$ gravity term selected in the next section.
+
+```{r}
+#| label: gravity-check
+grav_check <- function(y, rhs_g, rhs_f) {
+  small <- lm(as.formula(paste(y, "~", rhs_g)), data = train)
+  big   <- lm(as.formula(paste(y, "~", rhs_f)), data = train)
+  c(CV_gravity = cv_formula(formula(small))[["cv_RMSE"]],
+    CV_Fr = cv_formula(formula(big))[["cv_RMSE"]],
+    SE = cv_formula(formula(small))[["SE"]],
+    F_test_p = anova(small, big)[2, "Pr(>F)"])
+}
+grav_tab <- rbind(
+  t(sapply(responses, grav_check,
+           rhs_g = "poly(log_St, 3) + Re_f * Grav",
+           rhs_f = "poly(log_St, 3) + Re_f * Fr_f")),
+  "Mean (with St x gravity)" = grav_check("log_mean",
+           "poly(log_St, 3) * Grav + Re_f * Grav",
+           "poly(log_St, 3) * Grav + Re_f * Fr_f"))
+knitr::kable(signif(grav_tab, 3),
+             caption = "Two-level gravity vs three-level Fr")
+
+# Size of the Fr = 0.3 vs Inf difference for the mean, at each Re
+fr_mean <- lm(log_mean ~ poly(log_St, 3) * Grav + Re_f * Fr_f, data = train)
+nd <- encode(data.frame(St = 0.5, Re = c(90, 224, 90, 224),
+                        Fr = c(0.3, 0.3, Inf, Inf))) |> add_grav()
+p <- exp(predict(fr_mean, nd))
+c("Re 90: mean at Fr=0.3 / Fr=Inf" = p[[1]] / p[[3]],
+  "Re 224: mean at Fr=0.3 / Fr=Inf" = p[[2]] / p[[4]]) |> round(2)
+```
+
+For variance, skewness and kurtosis the simplification is fully supported: the CV errors are almost the same and the F-tests give no evidence of a difference. For the **mean**, the F-test does detect a difference between Fr = 0.3 and no gravity, but it is small (at St = 0.5 the mean at Fr = 0.3 is about 2% higher than with no gravity at Re = 90 and about 10% lower at Re = 224, compared with the 30-fold effect of Re), and the CV improvement is far less than one standard error. Following the one-standard-error rule we keep the simpler gravity variable for all four targets and report this small weak-gravity effect on the mean as a caveat. The gravity coding also removes the empty Re = 398, Fr = 0.3 cell, so every Re $\times$ gravity combination has data.
+
+# Which interactions? Model selection
+
+## All combinations of the two-way interactions
+
+Instead of adding interactions one at a time in a fixed order, we compare **every** combination of the three candidate two-way interactions (8 models), plus the full three-way interaction model and its lasso and ridge versions. Everything keeps the cubic in log St and the main effects of Re and gravity.
+
+```{r}
+#| label: interaction-search
+base_terms <- "poly(log_St, 3) + Re_f + Grav"
+int_terms <- c("Re x Grav" = "Re_f:Grav",
+               "St x Grav" = "poly(log_St, 3):Grav",
+               "St x Re"   = "poly(log_St, 3):Re_f")
+combos <- unlist(lapply(0:3, function(k)
+  combn(names(int_terms), k, simplify = FALSE)), recursive = FALSE)
+combo_names <- sapply(combos, function(cc)
+  if (length(cc)) paste(cc, collapse = " + ") else "None (additive)")
+rhs_int <- setNames(sapply(combos, function(cc)
+  paste(c(base_terms, int_terms[cc]), collapse = " + ")), combo_names)
+n_int <- setNames(lengths(combos), combo_names)   # complexity for one-SE rule
+
+# Full three-way interaction (separate St curve for every Re x gravity cell)
+rhs_full <- "poly(log_St, 3) * Re_f * Grav"
+x_matrix <- function(d)
+  model.matrix(~ poly(log_St, 3, raw = TRUE) * Re_f * Grav, data = d)[, -1]
+ncol(x_matrix(train)) + 1   # number of coefficients in the full model
+```
+
+**Why lasso and ridge?** The full model has 24 coefficients for 89 runs, under 4 runs per coefficient, and its interaction columns are highly correlated (powers of log St times indicators). Least squares on such a model has high variance. Penalized regression trades a little bias for less variance:
+
+-   **Ridge** shrinks all coefficients toward zero. It handles correlated predictors well, but it never removes a term.
+-   **Lasso** shrinks and can set coefficients exactly to zero, so it also does **variable selection**. This makes it useful for inference: the terms it keeps are the ones the data support.
+
+For both, the penalty $\lambda$ is chosen by an inner cross-validation inside each training fold, so their CV error is honest.
+
+```{r}
+#| label: cv-penalized
+cv_glmnet_model <- function(y, alpha, fo = folds) {
+  pred <- numeric(nrow(train))
+  for (k in 1:10) {
+    tr <- train[fo != k, ]; te <- train[fo == k, ]
+    set.seed(k)
+    fit <- cv.glmnet(x_matrix(tr), tr[[y]], alpha = alpha)
+    pred[fo == k] <- predict(fit, x_matrix(te), s = "lambda.min")
+  }
+  err <- train[[y]] - pred
+  c(cv_RMSE = sqrt(mean(err^2)),
+    SE = sd(tapply(err, fo, function(e) sqrt(mean(e^2)))) / sqrt(10))
+}
+
+all_rhs <- c(rhs_int, "Full 3-way" = rhs_full)
+sel_results <- bind_rows(lapply(names(responses), function(t) {
+  y <- responses[[t]]
+  ols <- t(sapply(all_rhs, function(r) cv_formula(as.formula(paste(y, "~", r)))))
+  pen <- rbind("Lasso (full)" = cv_glmnet_model(y, 1),
+               "Ridge (full)" = cv_glmnet_model(y, 0))
+  out <- as.data.frame(rbind(ols, pen))
+  out$model <- rownames(out); out$target <- t
+  out
+}))
+# complexity ranking: number of interactions; full / lasso / ridge are most complex
+sel_results$complexity <- ifelse(sel_results$model %in% names(n_int),
+                                 n_int[sel_results$model], 4)
+
+sel_results |>
+  mutate(cv_RMSE = round(cv_RMSE, 3)) |>
+  select(model, target, cv_RMSE) |>
+  pivot_wider(names_from = target, values_from = cv_RMSE) |>
+  knitr::kable(caption = "10-fold CV RMSE (log scale) for every interaction set")
+```
+
+**Reading the table.** Every model without Re $\times$ gravity is bad for variance, skewness and kurtosis. Adding St $\times$ gravity helps the mean a lot (about 0.10 to 0.074) but makes the other three worse. Adding St $\times$ Re makes things worse for all four. The full three-way model (a separate St curve for every Re $\times$ gravity cell) is the most interesting row: it is the worst choice for the mean but has the lowest CV error for the variance and kurtosis, a sign that the St curves may differ a little between settings. Ridge does worst overall: it shrinks the large, real Re and gravity effects toward zero along with the small ones, which adds bias. Lasso does much better than ridge because it can keep the large terms and drop small ones, but it does not beat the simpler models. Whether the full model's small gains are worth 24 coefficients is exactly what the one-SE rule decides next.
+
+## The one-standard-error rule
+
+For each target we take the model with the lowest CV RMSE, then pick the **simplest** model whose CV RMSE is within one standard error of it. This favors interpretability when the data cannot tell models apart.
+
+```{r}
+#| label: one-se
+one_se <- function(res) {
+  res |>
+    group_by(target) |>
+    mutate(threshold = cv_RMSE[which.min(cv_RMSE)] + SE[which.min(cv_RMSE)]) |>
+    filter(cv_RMSE <= threshold) |>
+    arrange(complexity, cv_RMSE, .by_group = TRUE) |>
+    slice(1) |>
+    ungroup()
+}
+selected <- one_se(sel_results)
+selected |>
+  transmute(target, model, cv_RMSE = round(cv_RMSE, 3),
+            threshold = round(threshold, 3)) |>
+  knitr::kable(caption = "Selected interactions per target (one-SE rule)")
+```
+
+The selected structure is **Re** $\times$ gravity for variance, skewness and kurtosis, and **Re** $\times$ gravity + St $\times$ gravity for the mean. For the variance and kurtosis, the full three-way model is lower but within one standard error, so the data cannot tell it apart from a model with 3 interaction terms instead of 16.
+
+## Validating the selection with repeated CV
+
+A single 10-fold split is random: a different split could pick a different model. To check that the selection is not luck, we repeat the whole selection with 20 different random splits and count how often each model wins. (Lasso and ridge are left out here to save time; they never came close.)
+
+```{r}
+#| label: repeated-cv
+set.seed(2026)
+rep_folds <- replicate(20, sample(rep(1:10, length.out = nrow(train))))
+
+rep_picks <- bind_rows(lapply(1:20, function(s) {
+  res <- bind_rows(lapply(names(responses), function(t) {
+    out <- as.data.frame(t(sapply(all_rhs, function(r)
+      cv_formula(as.formula(paste(responses[[t]], "~", r)), fo = rep_folds[, s]))))
+    out$model <- rownames(out); out$target <- t
+    out
+  }))
+  res$complexity <- ifelse(res$model %in% names(n_int), n_int[res$model], 4)
+  one_se(res) |> mutate(split = s)
+}))
+rep_picks |>
+  count(target, model, name = "times_chosen_out_of_20") |>
+  knitr::kable(caption = "One-SE choice across 20 random CV splits")
+```
+
+The same structure is chosen in (almost) every split, so the selection is stable and not an accident of one split.
+
+## Do the F-tests agree? Why we rely on CV
+
+The interactions can also be tested with nested F-tests, as in class.
+
+```{r}
+#| label: f-tests
+f_tests <- t(sapply(responses, function(y) {
+  fit <- function(r) lm(as.formula(paste(y, "~", r)), data = train)
+  m_add <- fit(base_terms)
+  m_rg  <- fit(paste(base_terms, "+ Re_f:Grav"))
+  c("Re x Grav (vs additive)"  = anova(m_add, m_rg)[2, "Pr(>F)"],
+    "St x Grav (vs Re x Grav)" = anova(m_rg, fit(paste(base_terms,
+                                  "+ Re_f:Grav + poly(log_St, 3):Grav")))[2, "Pr(>F)"],
+    "St x Re (vs Re x Grav)"   = anova(m_rg, fit(paste(base_terms,
+                                  "+ Re_f:Grav + poly(log_St, 3):Re_f")))[2, "Pr(>F)"])
+}))
+knitr::kable(formatC(f_tests, format = "e", digits = 1),
+             caption = "Nested F-test p-values")
+```
+
+The Re $\times$ gravity interaction is overwhelming by every measure. But the F-tests also call St $\times$ gravity and St $\times$ Re "significant" for every target, while CV says those terms make predictions *worse* for most targets. Two reasons the F-tests are too optimistic here:
+
+```{r}
+#| label: residual-spread
+# Residual SD within each (Re, Fr) setting, Re x gravity model
+spread <- sapply(responses, function(y) {
+  r <- resid(lm(as.formula(paste(y, "~ poly(log_St, 3) + Re_f * Grav")),
+                data = train))
+  s <- tapply(r, paste0("Re", train$Re, ", Fr", train$Fr), sd)
+  c(smallest = min(s), largest = max(s), ratio = max(s) / min(s))
+})
+round(spread, 3)
+```
+
+1.  **Unequal variation.** The F-test assumes the noise has the same size everywhere. The residual spread differs by a factor of 3 to 12 between settings, so a few noisy settings can make a term look significant.
+2.  **Testing after looking.** The interactions were suggested by the same data, and many tests were run, so the p-values are too small.
+
+CV makes neither assumption: it simply asks whether a term helps predict runs that were left out. So we use CV (with the one-SE rule) to select the model, and read the F-tests as saying that the St curve may differ a little between settings, but not by enough to estimate reliably from about 10 runs per setting. This is reported as a limitation.
+
+## What does the lasso keep?
+
+As a second variable-selection check, we fit the lasso on the full three-way model and look at which terms survive (using the larger, more conservative `lambda.1se` penalty).
+
+```{r}
+#| label: lasso-selection
+X <- x_matrix(train)
+colnames(X) <- gsub("poly\\(log_St, 3, raw = TRUE\\)", "logSt^", colnames(X))
+lasso_kept <- sapply(names(responses), function(t) {
+  set.seed(325)
+  fit <- cv.glmnet(X, train[[responses[[t]]]], alpha = 1)
+  b <- coef(fit, s = "lambda.1se")[-1, 1]
+  type <- ifelse(grepl("logSt", names(b)) & grepl("Re_f|Grav", names(b)),
+                 ifelse(grepl("Re_f", names(b)) & grepl("Grav", names(b)),
+                        "St x Re x Grav",
+                        ifelse(grepl("Re_f", names(b)), "St x Re", "St x Grav")),
+                 ifelse(grepl("Re_f", names(b)) & grepl("Grav", names(b)),
+                        "Re x Grav",
+                        ifelse(grepl("logSt", names(b)), "St",
+                               ifelse(grepl("Re_f", names(b)), "Re", "Grav"))))
+  tapply(b != 0, factor(type, levels = c("St", "Re", "Grav", "Re x Grav",
+                                         "St x Grav", "St x Re",
+                                         "St x Re x Grav")), sum)
+})
+lasso_kept   # number of nonzero coefficients of each type
+```
+
+The lasso keeps every main effect and the Re $\times$ gravity terms for all four targets, which agrees with our selection. It also keeps a few of the many St $\times$ Re and St $\times$ gravity terms, which matches the F-tests: there is some extra shape difference between settings, but it is small and spread over few terms.
+
+# How to model the nonlinearity in St
+
+## The danger of polynomials
+
+Polynomials are a good place to start, but they have a known weakness: they are *global* (every coefficient affects the curve everywhere), so a high-degree polynomial bends wildly near the edges of the data (Runge's phenomenon). That matters here because the most variable runs are at the edge, St = 0.05, and four test points sit at the edge of their setting's St range.
+
+The lecture's alternatives are more *local* and stable:
+
+-   **Natural cubic splines** `ns()`: piecewise cubics joined smoothly at knots (placed at quantiles of log St), and forced to be **linear beyond the boundary knots**, so they cannot shoot off at the edges. With df = $K$ they still fit inside `lm()`, so they keep all the inference tools.
+-   **Smoothing splines** (here through a GAM with `mgcv::gam`): a spline with a knot at every unique St, with a roughness penalty whose size is chosen automatically. No need to pick the number of knots.
+
+## Comparing the three in the selected structure
+
+We compare a polynomial of degree $d$ and a natural spline with df = $d$ for $d = 1$ to 6, averaged over the 20 repeated CV splits for stability, plus a smoothing spline.
+
+```{r}
+#| label: nonlinear-compare
+struct <- c(Mean     = "%s * Grav + Re_f * Grav",   # Re x Grav + St x Grav
+            Variance = "%s + Re_f * Grav",          # Re x Grav
+            Skewness = "%s + Re_f * Grav",
+            Kurtosis = "%s + Re_f * Grav")
+basis <- c(Polynomial = "poly(log_St, %d)", "Natural spline" = "ns(log_St, df = %d)")
+
+nl_grid <- expand.grid(d = 1:6, basis = names(basis), target = names(responses),
+                       stringsAsFactors = FALSE)
+nl_res <- t(mapply(function(d, b, t) {
+  f <- as.formula(paste(responses[[t]], "~",
+                        sprintf(struct[[t]], sprintf(basis[[b]], d))))
+  cvs <- sapply(1:20, function(s) cv_formula(f, fo = rep_folds[, s]))
+  c(Training = sqrt(mean(resid(lm(f, data = train))^2)),
+    CV = mean(cvs["cv_RMSE", ]), SE = mean(cvs["SE", ]))
+}, nl_grid$d, nl_grid$basis, nl_grid$target))
+nl_grid <- cbind(nl_grid, nl_res)
+
+nl_grid |>
+  mutate(target = factor(target, levels = names(responses))) |>
+  ggplot(aes(d, CV, color = basis)) +
+  geom_line() + geom_point(size = 1.3) +
+  facet_wrap(~ target, scales = "free_y", nrow = 1) +
+  scale_color_manual(values = c(Polynomial = "grey40",
+                                "Natural spline" = "#D55E00")) +
+  labs(x = "Degree (polynomial) or df (natural spline)",
+       y = "CV RMSE (avg of 20 splits)", color = NULL) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: gam-compare
+gam_f <- list(
+  Mean     = log_mean ~ s(log_St, by = Grav) + Grav + Re_f * Grav,
+  Variance = log_variance ~ s(log_St) + Re_f * Grav,
+  Skewness = log_skewness ~ s(log_St) + Re_f * Grav,
+  Kurtosis = log_kurtosis ~ s(log_St) + Re_f * Grav)
+gam_fit <- function(f, data) gam(f, data = data, method = "REML")
+nl_summary <- nl_grid |>
+  group_by(target, basis) |>
+  slice_min(CV, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  transmute(target, method = paste0(basis, " (best d = ", d, ")"),
+            CV = round(CV, 3), SE = round(SE, 3))
+gam_rows <- bind_rows(lapply(names(responses), function(t) {
+  cvs <- sapply(1:20, function(s) cv_formula(gam_f[[t]], fo = rep_folds[, s],
+                                             fitfun = gam_fit))
+  edf <- sum(gam_fit(gam_f[[t]], train)$edf) - 1
+  data.frame(target = t,
+             method = sprintf("Smoothing spline (edf = %.1f)", edf),
+             CV = round(mean(cvs["cv_RMSE", ]), 3),
+             SE = round(mean(cvs["SE", ]), 3))
+}))
+bind_rows(nl_summary, gam_rows) |>
+  arrange(factor(target, levels = names(responses))) |>
+  knitr::kable(caption = "Best of each nonlinear method (CV averaged over 20 splits)")
+```
+
+**Reading the plot and table.** Degree or df 1 (a straight line in log St) is clearly worse for every target, so the St effect is genuinely nonlinear. After that, polynomials, natural splines and smoothing splines all give nearly the same CV error, with differences much smaller than one standard error. The natural spline is best for the mean, the polynomial is slightly ahead for the variance, and they tie for skewness and kurtosis. The smoothing spline, which picks its own flexibility, lands in the same place, which is reassuring: our hand-picked flexibility is not far off.
+
+## Where they differ: the edges
+
+```{r}
+#| label: edge-plot
+#| fig-height: 3
+d_var_poly <- nl_grid |> filter(target == "Variance", basis == "Polynomial") |>
+  slice_min(CV, n = 1) |> pull(d)
+d_var_ns <- nl_grid |> filter(target == "Variance", basis == "Natural spline") |>
+  slice_min(CV, n = 1) |> pull(d)
+fit_poly <- lm(as.formula(sprintf("log_variance ~ poly(log_St, %d) + Re_f * Grav",
+                                  d_var_poly)), data = train)
+fit_ns   <- lm(as.formula(sprintf("log_variance ~ ns(log_St, df = %d) + Re_f * Grav",
+                                  d_var_ns)), data = train)
+edge_grid <- add_grav(encode(data.frame(
+  St = exp(seq(log(0.02), log(8), length.out = 200)), Re = 224, Fr = Inf)))
+edge_df <- bind_rows(
+  data.frame(edge_grid, fit = predict(fit_poly, edge_grid),
+             method = sprintf("Polynomial (d = %d)", d_var_poly)),
+  data.frame(edge_grid, fit = predict(fit_ns, edge_grid),
+             method = sprintf("Natural spline (df = %d)", d_var_ns)))
+ggplot(edge_df, aes(St, fit, color = method)) +
+  annotate("rect", xmin = 0.02, xmax = 0.05, ymin = -Inf, ymax = Inf, alpha = 0.15) +
+  annotate("rect", xmin = 3, xmax = 8, ymin = -Inf, ymax = Inf, alpha = 0.15) +
+  geom_line(linewidth = 0.8) +
+  geom_point(data = filter(train, Re == 224, Fr == Inf),
+             aes(St, log_variance), inherit.aes = FALSE) +
+  scale_x_log10(breaks = c(0.02, 0.05, 0.1, 0.3, 1, 3, 8)) +
+  scale_color_manual(values = c("grey40", "#D55E00")) +
+  labs(x = "St (log axis); shaded = outside all training data",
+       y = "log(variance)", color = NULL,
+       title = "Variance model at Re = 224, no gravity") +
+  theme(legend.position = "bottom")
+```
+
+**Reading the plot.** Inside the data (unshaded) the two curves almost agree. In the shaded regions, where there is no data at all, the polynomial keeps bending and quickly heads off in whatever direction its highest power points, while the natural spline continues in a straight line. Even at St = 0.05 and St = 3, the edges of the data, the two disagree noticeably for the variance.
+
+**Decision: use natural cubic splines.** Since CV cannot separate the three methods, we choose on the property that does differ: behaviour at the edges. Natural splines are as accurate as polynomials inside the data, are much more stable at the edges (where our noisiest runs and our extrapolated test points are), and still fit with `lm()`, so every inference tool carries over. The smoothing spline is equally accurate but harder to write down and explain. For each target we take the df with the lowest repeated-CV error.
+
+# Final models
+
+```{r}
+#| label: final-models
+chosen_df <- nl_grid |>
+  filter(basis == "Natural spline") |>
+  group_by(target) |>
+  slice_min(CV, n = 1, with_ties = FALSE) |>
+  ungroup()
+final_formulas <- setNames(lapply(names(responses), function(t) {
+  as.formula(paste(responses[[t]], "~",
+                   sprintf(struct[[t]], sprintf("ns(log_St, df = %d)",
+                           chosen_df$d[chosen_df$target == t]))))
+}), names(responses))
+final_formulas
+final_fits <- lapply(final_formulas, lm, data = train)
+
+final_cv <- t(sapply(final_formulas, cv_formula))   # original split, for reference
+data.frame(df = chosen_df$d[match(names(responses), chosen_df$target)],
+           n_coef = sapply(final_fits, function(f) length(coef(f))),
+           CV_RMSE = round(final_cv[, "cv_RMSE"], 3),
+           typical_factor = round(exp(final_cv[, "cv_RMSE"]), 2)) |>
+  knitr::kable(caption = "Final models (natural spline in log St)")
+```
+
+In words, every final model is
+
+$$
+\log(\text{summary}) = \underbrace{f(\log \text{St})}_{\text{natural spline}} + \text{Re} + \text{gravity} + \text{Re} \times \text{gravity} + \varepsilon,
+$$
+
+and for the mean the spline $f$ is allowed to have a different shape under strong gravity (St $\times$ gravity).
+
+## Are the interactions in the final models significant?
+
+CV chose the interactions because they improve prediction. For inference we also want to know whether each interaction is statistically significant in the final fitted model. We check this in two ways: the p-values of the individual interaction coefficients from `summary()`, and an F-test that compares the final model with the same model minus the interaction.
+
+**Example: the full fit for the variance.**
+
+```{r}
+#| label: summary-variance
+summary(final_fits$Variance)
+```
+
+The rows `Re_f224:Gravstrong` and `Re_f398:Gravstrong` are the Re $\times$ gravity interaction. Each one says how much the gravity effect at that Re differs from the gravity effect at Re = 90, on the log scale. Both are large and negative with p-values far below 0.05: the gravity effect is much smaller at Re = 224 and Re = 398 than at Re = 90, which is exactly the non-parallel lines in the EDA interaction plot. The `Gravstrong` row alone is the gravity effect at Re = 90.
+
+**Interaction coefficients in all four final models.**
+
+```{r}
+#| label: interaction-coefs
+int_coefs <- bind_rows(lapply(names(final_fits), function(t) {
+  co <- summary(final_fits[[t]])$coefficients
+  co <- co[grepl(":", rownames(co)), , drop = FALSE]
+  data.frame(target = t, term = rownames(co),
+             estimate = round(co[, "Estimate"], 3),
+             fold_change = format(signif(exp(co[, "Estimate"]), 3), scientific = FALSE, drop0trailing = TRUE),
+             t_value = round(co[, "t value"], 2),
+             p_value = formatC(co[, "Pr(>|t|)"], format = "e", digits = 1))
+}))
+rownames(int_coefs) <- NULL
+knitr::kable(int_coefs, caption = "Interaction coefficients in the final models")
+```
+
+`fold_change` is $e^{\text{estimate}}$. For example, a Re $\times$ gravity fold-change of 0.01 means the strong-gravity effect at that Re is 100 times smaller than at Re = 90. Every Re $\times$ gravity coefficient has a p-value far below 0.05 for all four summaries. The St $\times$ gravity coefficients for the mean are harder to read on their own, because each one changes one piece of the spline curve. Two of the four pieces are significant on their own and two are not (p around 0.1 and 0.4), which does not mean the interaction is weak: the pieces work together to bend the strong-gravity curve, so the right question is whether they matter *as a group*. The F-test below answers that.
+
+**F-test for each interaction as a whole.** Each interaction has several coefficients, so the cleanest test is a nested F-test: fit the final model with and without the interaction and compare them with `anova()`. A small p-value means removing the interaction makes the fit significantly worse. As a robustness check, the same test is repeated without the noisy St = 0.05 runs.
+
+```{r}
+#| label: interaction-ftests
+drop_term_test <- function(t, term, data = train) {
+  full <- lm(final_formulas[[t]], data = data)
+  reduced <- update(full, as.formula(paste(". ~ . -", term)))
+  a <- anova(reduced, full)
+  c(df = a$Df[2], F = a$F[2], p = a$`Pr(>F)`[2])
+}
+ns_term <- function(t) sprintf("ns(log_St, df = %d):Grav",
+                               chosen_df$d[chosen_df$target == t])
+tests <- list(
+  c("Mean",     "Re_f:Grav"), c("Mean", ns_term("Mean")),
+  c("Variance", "Re_f:Grav"),
+  c("Skewness", "Re_f:Grav"),
+  c("Kurtosis", "Re_f:Grav"))
+no_edge <- train[train$St > 0.05, ]
+int_ftests <- bind_rows(lapply(tests, function(x) {
+  all_runs <- drop_term_test(x[1], x[2])
+  trimmed  <- drop_term_test(x[1], x[2], data = no_edge)
+  data.frame(target = x[1],
+             interaction = ifelse(x[2] == "Re_f:Grav", "Re x Grav", "St x Grav"),
+             df = all_runs[["df"]], F = round(all_runs[["F"]], 1),
+             p_value = formatC(all_runs[["p"]], format = "e", digits = 1),
+             p_without_St_0.05 = formatC(trimmed[["p"]], format = "e", digits = 1))
+}))
+knitr::kable(int_ftests, caption = "F-test: final model vs. final model without the interaction")
+```
+
+Every interaction in the final models is highly significant (all p-values far below 0.05), and they stay significant without the St = 0.05 runs, so the result is not driven by the noisiest runs. The Re $\times$ gravity interaction is significant for all four summaries, and the St $\times$ gravity interaction is significant for the mean. Combined with the CV results (these interactions also improve prediction, and are chosen in almost every repeated split), there is strong evidence that the effect of gravity depends on Re for every summary, and that for the mean the shape of the St curve depends on gravity.
+
+The two interactions that were *not* selected are a different story. St $\times$ gravity (for the other three summaries) and St $\times$ Re also have small F-test p-values (see *Which interactions?*), but CV says they make predictions worse. A significant p-value alone is not enough to keep a term: with unequal noise between settings the F-test is too optimistic, so we require a term to be both significant and helpful out of sample. Only the interactions in the final models pass both checks.
+
+## Diagnostics
+
+```{r}
+#| label: diagnostics
+#| fig-height: 5
+diag_df <- bind_rows(lapply(names(final_fits), function(t) {
+  data.frame(target = t, fitted = fitted(final_fits[[t]]),
+             resid = rstandard(final_fits[[t]]), St = train$St)
+})) |> mutate(target = factor(target, levels = names(responses)),
+              edge = ifelse(St == 0.05, "St = 0.05", "other"))
+
+p1 <- ggplot(diag_df, aes(fitted, resid, shape = edge)) +
+  geom_hline(yintercept = 0, linetype = "dashed") + geom_point() +
+  facet_wrap(~ target, scales = "free_x", nrow = 1) +
+  scale_shape_manual(values = c("St = 0.05" = 4, other = 16)) +
+  labs(x = "Fitted log(target)", y = "Std. residual", shape = NULL)
+p2 <- ggplot(diag_df, aes(sample = resid)) +
+  stat_qq(size = 1) + stat_qq_line(color = "red") +
+  facet_wrap(~ target, nrow = 1) +
+  labs(x = "Theoretical quantile", y = "Std. residual")
+p1; p2
+```
+
+**Reading the plots.** In the residual plot, points scattered evenly around zero with no curve mean the model has captured the pattern; that is what we see. The crosses mark runs at St = 0.05, the smallest inertia, where clustering is just beginning and the summaries are noisy: they produce most of the large residuals and make the tails in the Q-Q plot heavier than normal. Together with the unequal spread between settings (see *Which interactions?*), this means the confidence and prediction intervals below are approximate.
+
+# Do we need a model? Comparison with no-model baselines
+
+This section backs up the argument at the start of the report with numbers.
+
+To show that the model adds something over the raw runs, compare it (leave-one-out) with two approaches that use no model at all:
+
+-   **Setting average:** predict a run by the average of the other runs at the same (Re, Fr).
+-   **Interpolation:** predict a run by connecting the neighbouring runs at the same (Re, Fr) with straight lines in log St (holding the end value flat beyond the last run).
+
+```{r}
+#| label: baselines
+baseline_loo <- function(y, type) {
+  pred <- sapply(seq_len(nrow(train)), function(i) {
+    same <- which(train$Re == train$Re[i] & train$Fr == train$Fr[i] &
+                  seq_len(nrow(train)) != i)
+    if (type == "avg") mean(train[[y]][same])
+    else approx(train$log_St[same], train[[y]][same],
+                xout = train$log_St[i], rule = 2)$y
+  })
+  sqrt(mean((train[[y]] - pred)^2))
+}
+model_loo <- function(f) {
+  y <- all.vars(f)[1]
+  err <- sapply(seq_len(nrow(train)), function(i)
+    train[[y]][i] - predict(lm(f, data = train[-i, ]), train[i, ]))
+  sqrt(mean(err^2))
+}
+rbind("Setting average"        = sapply(responses, baseline_loo, type = "avg"),
+      "Interpolation"          = sapply(responses, baseline_loo, type = "interp"),
+      "Final model"            = sapply(final_formulas, model_loo)) |>
+  round(3) |>
+  knitr::kable(caption = "Leave-one-out RMSE (log scale)")
+```
+
+The final model beats both baselines for every summary, by a wide margin for the mean and variance. It does this because it pools information: the shape of the St curve is learned from all settings at once instead of from the 10 or so runs in one setting. The baselines also cannot give effect sizes, confidence intervals or tests, cannot say whether an effect is linear, and cannot predict a setting that was never run (for example Re = 398 with Fr = 0.3, which the gravity model can). That is the case for a statistical model here.
+
+# Scientific inference
+
+## How much variation does each input explain?
+
+To rank the inputs, we remove all terms involving one input from the final model and see how much of the variation in log(summary) is lost. Terms are shared (for example Re $\times$ gravity involves both Re and gravity), so the losses do not add up to the total.
+
+```{r}
+#| label: importance
+drop_r2 <- function(t) {
+  y <- responses[[t]]
+  df_t <- chosen_df$d[chosen_df$target == t]
+  s <- sprintf("ns(log_St, df = %d)", df_t)
+  full <- summary(final_fits[[t]])$r.squared
+  r2 <- function(rhs) summary(lm(as.formula(paste(y, "~", rhs)), data = train))$r.squared
+  c(R2_full = full,
+    drop_St      = full - r2("Re_f * Grav"),
+    drop_Re      = full - r2(if (t == "Mean") paste(s, "* Grav") else paste(s, "+ Grav")),
+    drop_gravity = full - r2(paste(s, "+ Re_f")),
+    drop_Re_x_Grav = full - r2(if (t == "Mean") paste(s, "* Grav + Re_f")
+                               else paste(s, "+ Re_f + Grav")))
+}
+sapply(names(responses), drop_r2) |> round(3) |>
+  knitr::kable(caption = "R-squared lost when an input is removed")
+```
+
+Re explains the most variation for the mean and variance, and Re and gravity are about equally important for skewness and kurtosis, with a large part coming from their interaction. Gravity explains almost nothing for the mean. St explains about 11% of the variation in the variance and 1% or less for the other three: its effect is real and nonlinear (CV clearly prefers a curve in St), but small next to Re and gravity.
+
+## Fitted effects
+
+```{r}
+#| label: effect-curves
+#| fig-height: 7.5
+settings <- unique(train[, c("Re", "Fr", "Re_f", "Fr_f", "Grav")])
+grid <- merge(settings, data.frame(St = exp(seq(log(0.05), log(3),
+                                                length.out = 60))))
+grid$log_St <- log(grid$St)
+
+curves <- bind_rows(lapply(names(final_fits), function(t) {
+  p <- predict(final_fits[[t]], newdata = grid, interval = "confidence")
+  cbind(grid, target = t, fit = exp(p[, "fit"]),
+        lwr = exp(p[, "lwr"]), upr = exp(p[, "upr"]))
+}))
+obs <- long |> mutate(target = recode(target, mean = "Mean",
+  variance = "Variance", skewness = "Skewness", kurtosis = "Kurtosis"))
+lv <- names(responses)
+curves$target <- factor(curves$target, levels = lv)
+obs$target <- factor(obs$target, levels = lv)
+
+ggplot(curves, aes(St, fit, color = Fr_f, fill = Fr_f)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr), alpha = 0.2, color = NA) +
+  geom_line() +
+  geom_point(data = obs, aes(St, value, color = Fr_f), inherit.aes = FALSE,
+             size = 1) +
+  facet_grid(target ~ Re_f, scales = "free_y",
+             labeller = labeller(Re_f = function(x) paste("Re =", x))) +
+  scale_x_log10(breaks = c(0.05, 0.1, 0.3, 1, 3)) + scale_y_log10() +
+  scale_color_manual(values = fr_cols, name = "Fr") +
+  scale_fill_manual(values = fr_cols, name = "Fr") +
+  labs(x = "St (log axis)", y = "Value (log axis)",
+       title = "Final models: fitted curves, 95% CI bands, and data") +
+  theme(legend.position = "bottom")
+```
+
+**Reading the plot.** Same layout as the EDA plot, now with the model's fitted curves and 95% confidence bands. Fr = 0.3 and Fr = Inf share one curve (the gravity coding), so only two curves are visible per panel. The curves follow the data closely. Within a row, the vertical gap between the orange and green curves is the gravity effect: large at Re = 90 for variance, skewness and kurtosis and nearly gone at Re = 398. For the mean, the orange curve flattens at large St, which is the St $\times$ gravity interaction.
+
+## Effect sizes
+
+Each effect compares two settings, holding the others fixed, as a **fold-change**: the ratio of predicted values (1 = no effect), with a 95% confidence interval.
+
+```{r}
+#| label: effect-sizes
+setting <- function(St, Re, Fr) add_grav(encode(data.frame(St = St, Re = Re, Fr = Fr)))
+fold_change <- function(fit, a, b) {
+  # log-scale difference between settings a and b, with a 95% CI
+  X <- model.matrix(delete.response(terms(fit)), rbind(a, b),
+                    xlev = fit$xlevels)
+  cvec <- X[1, ] - X[2, ]
+  est <- sum(cvec * coef(fit))
+  se <- sqrt(drop(t(cvec) %*% vcov(fit) %*% cvec))
+  q <- qt(0.975, df.residual(fit))
+  sprintf("%.3g (%.2g, %.2g)", exp(est), exp(est - q * se), exp(est + q * se))
+}
+contrasts <- list(
+  "Re 90 -> 224 (no gravity)" = list(setting(0.5, 224, Inf), setting(0.5, 90, Inf)),
+  "Re 224 -> 398 (no gravity)" = list(setting(0.5, 398, Inf), setting(0.5, 224, Inf)),
+  "Strong vs no gravity, Re 90" = list(setting(0.5, 90, 0.052), setting(0.5, 90, Inf)),
+  "Strong vs no gravity, Re 224" = list(setting(0.5, 224, 0.052), setting(0.5, 224, Inf)),
+  "Strong vs no gravity, Re 398" = list(setting(0.5, 398, 0.052), setting(0.5, 398, Inf)),
+  "St 0.1 -> 1 (no gravity)" = list(setting(1, 224, Inf), setting(0.1, 224, Inf)),
+  "St 1 -> 3 (no gravity)" = list(setting(3, 224, Inf), setting(1, 224, Inf))
+)
+effects <- sapply(final_fits, function(fit)
+  sapply(contrasts, function(cc) fold_change(fit, cc[[1]], cc[[2]])))
+knitr::kable(effects, caption = paste("Fold-change (95% CI); St = 0.5",
+                                      "unless St is the input changed"))
+```
+
+## Findings
+
+**How does each parameter affect the cluster-volume distribution?**
+
+-   **Re (turbulence intensity)** has the largest effect. Higher Re makes the mean (normalized) cluster volume much smaller but makes the distribution far more skewed and heavy-tailed: stronger turbulence produces many smaller clusters plus rare very large ones. The effect is nonlinear across the three Re levels (the first step changes the summaries much more than the second).
+-   **Fr (gravity)** matters only when gravity is strong (Fr = 0.052); weak gravity behaves like no gravity (with a small exception for the mean). The strong-gravity effect depends on Re: very large at Re = 90, smaller at Re = 224, and gone by Re = 398, because intense turbulence breaks up the structures that settling creates.
+-   **St (particle inertia)** has a clearly nonlinear effect (a straight line in log St is worse for every summary), but it explains less variation than Re and gravity. The mean and variance increase with St, while skewness and kurtosis stay roughly flat at small St and drop at large St (kurtosis falls by about a third from St = 1 to 3).
+
+**Are the effects the same for all four summaries?** No.
+
+-   Re moves the mean down but skewness and kurtosis up.
+-   Gravity changes the mean by at most about 40% but multiplies the variance (up to about 750 times at Re = 90) and the tail measures: it mainly changes how unequal cluster sizes are, not the typical size.
+-   Only the mean needs a St $\times$ gravity interaction: under strong gravity, the mean cluster volume stops growing at large St.
+-   Kurtosis follows skewness closely (kurtosis $\approx$ skewness$^2$).
+
+## Limitations
+
+-   **Re and Fr are categorical.** The model only knows Re = 90, 224, 398 and Fr = 0.052, 0.3, Inf. It cannot predict or make inference at other values; that would need more simulations at new levels.
+-   **St outside 0.05 to 3** is outside all the data. Natural splines extrapolate linearly, which is safer than a polynomial, but still an assumption.
+-   **Shared St curve.** Except for the mean under gravity, the model assumes the St curve has the same shape in every setting. F-tests and the lasso suggest small differences between settings that the data cannot estimate reliably.
+-   **Unequal noise.** The residual spread differs between settings and is largest at St = 0.05, so intervals are approximate.
+-   **Small weak-gravity effect on the mean** is ignored by the two-level gravity variable.
+
+# Final predictions on the test set
+
+The final models are refit on all 89 training runs and used to predict the 23 test settings. The case study asks for the four summary statistics, so the raw moments $E[X^k]$ are not needed for the test set. Predictions are back-transformed with `exp()`, so they estimate the median of each summary at that setting.
+
+```{r}
+#| label: predict-test
+pred_log <- sapply(final_fits, function(fit)
+  predict(fit, newdata = test, interval = "prediction"), simplify = FALSE)
+
+predictions <- data.frame(
+  St = test$St, Re = test$Re, Fr = test$Fr,
+  mean     = exp(pred_log$Mean[, "fit"]),
+  sd       = sqrt(exp(pred_log$Variance[, "fit"])),
+  variance = exp(pred_log$Variance[, "fit"]),
+  skewness = exp(pred_log$Skewness[, "fit"]),
+  kurtosis = exp(pred_log$Kurtosis[, "fit"])
+)
+
+# Saved next to this file (not in data/), so the original
+# data/data-test.csv is not overwritten
+write.csv(predictions, file.path(dirname(knitr::current_input(dir = TRUE)), "data-test.csv"),
+          row.names = FALSE)
+
+predictions |>
+  mutate(across(mean:kurtosis, \(x) format(signif(x, 3), trim = TRUE))) |>
+  knitr::kable(caption = "Test-set predictions", align = "r")
+```
+
+```{r}
+#| label: test-checks
+# Sanity checks: all predictions positive and finite
+all(is.finite(as.matrix(predictions[, 4:8]))) &&
+  all(predictions[, 4:8] > 0)
+```
+
+## Uncertainty in the predictions
+
+The table below gives a 95% prediction interval for each summary (shown for the mean and variance; the same is done for all four). Four test settings use an St outside the range observed for their own (Re, Fr) setting. Because the St curve is shared across settings, the model still has data at those St values from other settings, so these are milder extrapolations than they look, but they rely on the shared-curve assumption.
+
+```{r}
+#| label: uncertainty
+st_range <- train |> group_by(Re, Fr) |>
+  summarise(st_min = min(St), st_max = max(St), .groups = "drop")
+extrapolation <- test |> left_join(st_range, by = c("Re", "Fr")) |>
+  mutate(ext = St < st_min | St > st_max) |> pull(ext)
+
+data.frame(
+  St = test$St, Re = test$Re, Fr = test$Fr,
+  mean = sprintf("%.3g (%.3g, %.3g)", exp(pred_log$Mean[, "fit"]),
+                 exp(pred_log$Mean[, "lwr"]), exp(pred_log$Mean[, "upr"])),
+  variance = sprintf("%.3g (%.3g, %.3g)", exp(pred_log$Variance[, "fit"]),
+                     exp(pred_log$Variance[, "lwr"]),
+                     exp(pred_log$Variance[, "upr"])),
+  extrapolation = extrapolation
+) |>
+  knitr::kable(caption = "Predictions with 95% prediction intervals")
+```
+
+```{r}
+#| label: compare-old
+# How much did switching from polynomials to natural splines change the
+# test predictions? (ratio new / old)
+old_formulas <- list(
+  Mean     = log_mean     ~ poly(log_St, 4) * Grav + Re_f * Grav,
+  Variance = log_variance ~ poly(log_St, 4) + Re_f * Grav,
+  Skewness = log_skewness ~ poly(log_St, 2) + Re_f * Grav,
+  Kurtosis = log_kurtosis ~ poly(log_St, 2) + Re_f * Grav)
+ratio <- sapply(names(final_fits), function(t)
+  exp(predict(final_fits[[t]], test) - predict(lm(old_formulas[[t]], train), test)))
+summary_ratio <- apply(ratio, 2, function(r) c(min = min(r), median = median(r), max = max(r)))
+round(summary_ratio, 2)
+```
+
+The prediction intervals come from the linear models and assume the typical residual size applies everywhere. Since the noise is larger at St = 0.05 and in some settings, the intervals for those test points should be read as optimistic.
